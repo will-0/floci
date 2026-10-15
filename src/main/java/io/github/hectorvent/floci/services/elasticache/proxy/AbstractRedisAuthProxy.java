@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.elasticache.proxy;
 
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
@@ -65,6 +66,7 @@ public abstract class AbstractRedisAuthProxy {
 
     private volatile boolean running;
     private ServerSocket serverSocket;
+    private SSLContext tls;
 
     protected AbstractRedisAuthProxy(Logger log, String serviceName, String threadPrefix,
                                       String resourceId, String backendHost, int backendPort) {
@@ -94,7 +96,13 @@ public abstract class AbstractRedisAuthProxy {
     protected abstract void closeQuietly(Socket socket);
 
     public void start(int proxyPort) throws IOException {
-        serverSocket = new ServerSocket(proxyPort);
+        start(proxyPort, null);
+    }
+
+    /** With {@code tls}, clients connect over TLS, and the proxy reaches the backend over TLS too. */
+    public void start(int proxyPort, SSLContext tls) throws IOException {
+        this.tls = tls;
+        serverSocket = tls == null ? new ServerSocket(proxyPort) : tls.getServerSocketFactory().createServerSocket(proxyPort);
         running = true;
         Thread.ofVirtual().name(threadPrefix + "-proxy-accept-" + resourceId).start(this::acceptLoop);
         log.infov("{0} proxy started for {1} on port {2} → {3}:{4}",
@@ -294,7 +302,8 @@ public abstract class AbstractRedisAuthProxy {
     }
 
     private void bridgeCommand(Socket client, String[] command) throws IOException {
-        Socket backend = new Socket(backendHost, backendPort);
+        Socket backend = tls == null ? new Socket(backendHost, backendPort)
+                : tls.getSocketFactory().createSocket(backendHost, backendPort);
         try {
             backend.setTcpNoDelay(true);
             if (command != null) {

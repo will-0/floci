@@ -68,7 +68,11 @@ the cache keyspace itself comes back empty, as for the other local cache runtime
 Tags on a serverless cache are set at creation and are not editable afterwards, because
 `AddTagsToResource` and `RemoveTagsFromResource` are not implemented for ElastiCache.
 
-Local serverless caches have fixed capacity and plaintext TCP endpoints. Usage limits, subnet and
+Local serverless caches have fixed capacity. With Floci's TLS on (`FLOCI_TLS_ENABLED=true`), a
+Valkey or Redis serverless cache speaks TLS only, as on AWS, under a certificate from Floci's CA for
+its endpoint address: connect with `rediss://<Endpoint.Address>:<Endpoint.Port>` and trust the CA
+(`GET /_floci/ca.pem`; containers Floci launches already do). Otherwise, and for Memcached, the
+endpoint is plaintext TCP. Usage limits, subnet and
 security-group placement, KMS encryption and snapshot schedules are metadata; they do not enable
 autoscaling, VPC networking, encryption or snapshot storage. Snapshot restore and final snapshots
 are rejected explicitly. Engine/version transitions are rejected; supported major versions are

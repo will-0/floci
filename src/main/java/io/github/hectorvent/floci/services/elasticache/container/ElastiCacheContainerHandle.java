@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.elasticache.container;
 
+import javax.net.ssl.SSLContext;
 import java.io.Closeable;
 
 /**
@@ -13,6 +14,7 @@ public class ElastiCacheContainerHandle {
     private final int port;
     private String networkIp;
     private Closeable logStream;
+    private SSLContext tls;
 
     public ElastiCacheContainerHandle(String containerId, String groupId, String host, int port) {
         this.containerId = containerId;
@@ -32,4 +34,8 @@ public class ElastiCacheContainerHandle {
 
     public Closeable getLogStream() { return logStream; }
     public void setLogStream(Closeable logStream) { this.logStream = logStream; }
+
+    /** Serves the backend's certificate and trusts Floci's CA; null when the backend speaks plaintext. */
+    public SSLContext getTls() { return tls; }
+    public void setTls(SSLContext tls) { this.tls = tls; }
 }

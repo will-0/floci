@@ -31,7 +31,8 @@ import java.util.Map;
  * by default outlives the application and is adopted by name on the next start. This profile names
  * it in this run's {@link SidecarContainersProfile#namespace() sidecar namespace} and stops it at
  * shutdown, so the test never pushes into a registry a developer's Floci or another run owns and
- * leaves none behind. The other classes start no containers, so both overrides are inert for them.
+ * leaves none behind. For the other classes, the namespace only keeps the containers they start
+ * apart from other runs'.
  *
  * <p>The paths are compile-time constants so a test can use them without initializing this class,
  * which would write a new leaf under the running application.

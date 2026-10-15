@@ -184,7 +184,7 @@ class ElastiCacheServerlessServiceTest {
         ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator = ArgumentCaptor.forClass(
                 ElastiCacheAuthProxy.PasswordValidator.class);
         verify(proxies).startProxy(eq(cache.getBackingCacheClusterId()), any(), anyInt(), anyString(), anyInt(),
-                validator.capture(), eq("cache"));
+                validator.capture(), eq("cache"), any());
         assertTrue(validator.getValue().validatePassword("alice", "password-a"));
         assertFalse(validator.getValue().validatePassword("bob", "password-b"));
         runtime.modifyUserGroup("team", List.of("bob"), List.of("alice"), null);
@@ -257,7 +257,7 @@ class ElastiCacheServerlessServiceTest {
         ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator = ArgumentCaptor.forClass(
                 ElastiCacheAuthProxy.PasswordValidator.class);
         verify(proxies).startProxy(eq(cache.getBackingCacheClusterId()), any(), anyInt(), anyString(), anyInt(),
-                validator.capture(), eq("empty-cache"));
+                validator.capture(), eq("empty-cache"), any());
         assertTrue(validator.getValue().hasMembers());
         assertNull(validator.getValue().memberAuthMode("default"));
         assertFalse(validator.getValue().validatePassword(null, "password-a"));
@@ -326,7 +326,7 @@ class ElastiCacheServerlessServiceTest {
         ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator = ArgumentCaptor.forClass(
                 ElastiCacheAuthProxy.PasswordValidator.class);
         verify(proxies).startProxy(eq(restored.getBackingCacheClusterId()), any(), anyInt(), anyString(), anyInt(),
-                validator.capture(), eq("persistent"));
+                validator.capture(), eq("persistent"), any());
         assertTrue(validator.getValue().validatePassword("member", "secret"));
         assertEquals(List.of("us-east-1/persistent"), List.copyOf(reloadedRuntime.getUserGroup("persisted-team").getServerlessCacheEngines().keySet()));
         reloaded.deleteServerlessCache("persistent");
@@ -354,7 +354,7 @@ class ElastiCacheServerlessServiceTest {
         ArgumentCaptor<ElastiCacheAuthProxy.PasswordValidator> validator = ArgumentCaptor.forClass(
                 ElastiCacheAuthProxy.PasswordValidator.class);
         verify(proxies).startProxy(eq(original.getBackingCacheClusterId()), any(), anyInt(), anyString(), anyInt(),
-                validator.capture(), eq("account-cache"));
+                validator.capture(), eq("account-cache"), any());
         assertTrue(validator.getValue().validatePassword("alice", "owner-secret"));
         assertFalse(validator.getValue().validatePassword("alice", "password-a"));
         assertEquals("111111111111", validator.getValue().ownerAccountId());

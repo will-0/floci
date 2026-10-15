@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.SSLContext;
 import java.io.IOException;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -28,17 +29,18 @@ public class ElastiCacheProxyManager {
     public void startProxy(String groupId, AuthMode authMode, int proxyPort,
                            String backendHost, int backendPort,
                            ElastiCacheAuthProxy.PasswordValidator passwordValidator) {
-        startProxy(groupId, authMode, proxyPort, backendHost, backendPort, passwordValidator, groupId);
+        startProxy(groupId, authMode, proxyPort, backendHost, backendPort, passwordValidator, groupId, null);
     }
 
     public void startProxy(String groupId, AuthMode authMode, int proxyPort,
                            String backendHost, int backendPort,
-                           ElastiCacheAuthProxy.PasswordValidator passwordValidator, String authIdentity) {
+                           ElastiCacheAuthProxy.PasswordValidator passwordValidator, String authIdentity,
+                           SSLContext tls) {
         ElastiCacheAuthProxy proxy = new ElastiCacheAuthProxy(
                 authIdentity, authMode, backendHost, backendPort,
                 passwordValidator, sigV4Validator);
         try {
-            proxy.start(proxyPort);
+            proxy.start(proxyPort, tls);
             proxies.put(groupId, proxy);
         } catch (IOException e) {
             throw new RuntimeException("Failed to start proxy for group " + groupId

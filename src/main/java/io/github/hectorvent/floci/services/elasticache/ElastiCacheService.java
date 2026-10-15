@@ -826,6 +826,8 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultImage();
         try {
+            containerManager.serveTls(clusterId, cluster.getServerlessCacheName() != null
+                    ? cluster.getConfigurationEndpoint().address() : null);
             ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, regionOf(cluster.getArn()));
             synchronized (lockFor("cc:" + clusterId)) {
                 if (cacheClusterRestoreTargetLost(accountId, clusterId)) {
@@ -1452,15 +1454,16 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
             ElastiCacheContainerManager.VpcPlacement vpc = vpcPlacement(request.cacheSubnetGroupName(),
                     request.subnetIds(), request.securityGroupIds(), request.region(), proxyPort);
             containerManager.placeInVpc(clusterId, vpc);
+            String endpointHost = vpc == null ? resolveEndpointHost()
+                    : vpcEndpointHost(cacheName != null ? cacheName + ".serverless" : clusterId, request.region());
+            containerManager.serveTls(clusterId, cacheName != null ? endpointHost : null);
             handle = containerManager.tryStart(clusterId, image, request.region());
 
             CacheCluster cluster = new CacheCluster(clusterId, CacheClusterStatus.AVAILABLE, engine,
                     request.engineVersion() != null && !request.engineVersion().isBlank()
                             ? request.engineVersion()
                             : defaultEngineVersion(engine),
-                    new Endpoint(vpc == null ? resolveEndpointHost()
-                            : vpcEndpointHost(cacheName != null ? cacheName + ".serverless" : clusterId,
-                                    request.region()), proxyPort), Instant.now());
+                    new Endpoint(endpointHost, proxyPort), Instant.now());
             cluster.setNumCacheNodes(1);
             cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
                     ? request.cacheNodeType()
@@ -1670,7 +1673,7 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
         } else {
             proxyManager.startProxy(cluster.getCacheClusterId(), AuthMode.NO_AUTH,
                     cluster.getConfigurationEndpoint().port(), handle.getHost(), handle.getPort(),
-                    serverlessAuthenticator(cluster), cluster.getServerlessCacheName());
+                    serverlessAuthenticator(cluster), cluster.getServerlessCacheName(), handle.getTls());
         }
     }
 

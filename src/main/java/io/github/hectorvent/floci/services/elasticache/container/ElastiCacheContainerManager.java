@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.elasticache.container;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
+import io.github.hectorvent.floci.core.common.Pem;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
@@ -10,22 +12,36 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
 import io.github.hectorvent.floci.services.ec2.VpcAttachments;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.TrustManagerFactory;
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.GeneralSecurityException;
+import java.security.KeyStore;
+import java.security.cert.Certificate;
+import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Stream;
 
 /**
  * Manages backend Docker container lifecycle for ElastiCache replication groups.
@@ -59,6 +75,9 @@ public class ElastiCacheContainerManager {
     Instance<VpcAttachments> vpcAttachments;
     private final Map<String, VpcPlacement> vpcPlacements = new ConcurrentHashMap<>();
     private final Map<String, Runnable> vpcDetachers = new ConcurrentHashMap<>();
+    @Inject
+    Instance<FlociCertificateAuthority> certificateAuthority;
+    private final Map<String, String> tlsHosts = new ConcurrentHashMap<>();
 
     /** A backend's subnet and security groups, and the proxy port its in-VPC clients may also use. */
     public record VpcPlacement(String subnetId, List<String> securityGroupIds, int proxyPort) {}
@@ -149,6 +168,15 @@ public class ElastiCacheContainerManager {
         for (String flag : extraServerFlags) {
             serverFlags.append(' ').append(flag);
         }
+        String tlsHost = tlsHosts.get(groupId);
+        CertificateGenerator.GeneratedCertificate certificate = tlsHost == null || !config.tls().enabled() ? null
+                : certificateAuthority.get().issueServerCertificate("localhost",
+                        Stream.of(tlsHost, "localhost").distinct().toList(), KeyAlgorithm.EC_prime256v1, null);
+        SSLContext tls = certificate == null ? null : sslContext(certificate);
+        if (certificate != null) {
+            serverFlags.append(" --port 0 --tls-port ").append(BACKEND_PORT).append(" --tls-auth-clients no")
+                    .append(" --tls-cert-file /floci-tls/server.crt --tls-key-file /floci-tls/server.key");
+        }
 
         // Build container spec. Only publish the backend port to the host in
         // native mode — in Docker mode the JVM reaches the container via its
@@ -175,7 +203,7 @@ public class ElastiCacheContainerManager {
         // Create and start container
         ContainerInfo info;
         try {
-            info = lifecycleManager.createAndStart(spec);
+            info = certificate == null ? lifecycleManager.createAndStart(spec) : startWithCertificate(spec, certificate);
         } catch (RuntimeException e) {
             detachVpc(groupId);
             throw e;
@@ -195,6 +223,7 @@ public class ElastiCacheContainerManager {
             LOG.warnv("Could not resolve network IP for ElastiCache container {0}: {1}",
                     info.containerId(), e.getMessage());
         }
+        handle.setTls(tls);
         activeContainers.put(groupId, handle);
 
         // Attach log streaming
@@ -208,17 +237,73 @@ public class ElastiCacheContainerManager {
                 info.containerId(), logGroup, logStream, region, "elasticache:" + groupId);
         handle.setLogStream(logHandle);
 
-        waitForBackendReady(groupId, endpoint.host(), endpoint.port());
+        waitForBackendReady(groupId, endpoint.host(), endpoint.port(), tls);
 
         return handle;
     }
 
-    private static void waitForBackendReady(String groupId, String host, int port) {
+    /**
+     * Whether the group's next backend speaks TLS alone, as a serverless cache does on AWS, under a
+     * leaf from Floci's CA for {@code host}. Null, or Floci's TLS off, keeps it on plaintext.
+     */
+    public void serveTls(String groupId, String host) {
+        if (host == null) {
+            tlsHosts.remove(groupId);
+        } else {
+            tlsHosts.put(groupId, host);
+        }
+    }
+
+    private ContainerInfo startWithCertificate(ContainerSpec spec, CertificateGenerator.GeneratedCertificate certificate) {
+        String containerId = lifecycleManager.create(spec);
+        try (ByteArrayOutputStream archive = new ByteArrayOutputStream()) {
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
+                // Default mode 0644: Valkey reads the key as its own user, and the key covers this cache alone.
+                for (Map.Entry<String, String> file : Map.of("floci-tls/server.crt", certificate.certificatePem(),
+                        "floci-tls/server.key", certificate.privateKeyPem()).entrySet()) {
+                    byte[] content = file.getValue().getBytes(StandardCharsets.UTF_8);
+                    TarArchiveEntry entry = new TarArchiveEntry(file.getKey());
+                    entry.setSize(content.length);
+                    tar.putArchiveEntry(entry);
+                    tar.write(content);
+                    tar.closeArchiveEntry();
+                }
+            }
+            lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId).withRemotePath("/")
+                    .withTarInputStream(new ByteArrayInputStream(archive.toByteArray())).exec();
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to install a TLS certificate into " + containerId, e);
+        }
+        return lifecycleManager.startCreated(containerId, spec);
+    }
+
+    /** Serves the cache's leaf and trusts Floci's CA, for the proxy and the readiness probe alike. */
+    private SSLContext sslContext(CertificateGenerator.GeneratedCertificate certificate) {
+        try {
+            X509Certificate ca = certificateAuthority.get().certificate();
+            KeyStore store = KeyStore.getInstance("PKCS12");
+            store.load(null, null);
+            store.setKeyEntry("cache", Pem.parsePrivateKey(certificate.privateKeyPem()), new char[0],
+                    new Certificate[] {Pem.parseCertificate(certificate.certificatePem()), ca});
+            store.setCertificateEntry("ca", ca);
+            KeyManagerFactory keys = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+            keys.init(store, new char[0]);
+            TrustManagerFactory trust = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
+            trust.init(store);
+            SSLContext context = SSLContext.getInstance("TLS");
+            context.init(keys.getKeyManagers(), trust.getTrustManagers(), null);
+            return context;
+        } catch (GeneralSecurityException | IOException e) {
+            throw new IllegalStateException("Failed to build the TLS context of a cache certificate", e);
+        }
+    }
+
+    private static void waitForBackendReady(String groupId, String host, int port, SSLContext tls) {
         long deadline = System.currentTimeMillis() + BACKEND_READY_DEADLINE_MS;
         int attempt = 0;
         while (System.currentTimeMillis() < deadline) {
             attempt++;
-            try (Socket s = new Socket()) {
+            try (Socket s = tls == null ? new Socket() : tls.getSocketFactory().createSocket()) {
                 s.connect(new InetSocketAddress(host, port), BACKEND_PROBE_CONNECT_MS);
                 s.setTcpNoDelay(true);
                 s.setSoTimeout(BACKEND_PROBE_CONNECT_MS);
