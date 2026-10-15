@@ -107,7 +107,7 @@ This foundation release provides opt-in security-group filtering for EC2 Docker 
 
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` | `false` | Opt in to filtering Docker-backed EC2 and ECS `awsvpc` traffic by attached security groups |
+| `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_ENABLED` | `false` | Opt in to filtering Docker-backed EC2, ECS `awsvpc`, VPC Lambda, RDS and ElastiCache traffic by attached security groups and route tables |
 | `FLOCI_NETWORK_SECURITY_GROUP_ENFORCEMENT_HELPER_IMAGE` | `floci/network-helper:local` | Linux helper image containing nftables; Floci builds the default image locally when missing |
 | `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket path or TCP address |
 | `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | _(none)_ | Path to a directory containing Docker's `config.json` for registry auth |

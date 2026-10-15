@@ -310,7 +310,7 @@ public class SecurityGroupFirewallManager {
         if (floci == null || !floci.matches("[0-9.]+|[0-9a-fA-F:]+")) {
             floci = null;
         }
-        var lambda = config.services().lambda();
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
         boolean internet = ec2Service.isUnsatisfied()
                 || ec2Service.get().reachesInternet(endpoint.region(), endpoint.eniId());
         return new SecurityGroupNftCompiler.ControlPlane(floci,
