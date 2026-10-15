@@ -8,8 +8,8 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
  *
  * <p>Modelled for RegisterTaskDefinition/DescribeTaskDefinition round-trip fidelity — a client that
  * reads back what it registered (Terraform, or a deploy tool verifying its own write) must see the
- * platform it asked for. Floci runs every task on the host's own architecture, so the value has no
- * effect on where a local task is placed.
+ * platform it asked for. Container image pulls and creation use this declared platform; running
+ * a different architecture requires the Docker daemon to support it.
  */
 @RegisterForReflection
 public record RuntimePlatform(String cpuArchitecture, String operatingSystemFamily) {

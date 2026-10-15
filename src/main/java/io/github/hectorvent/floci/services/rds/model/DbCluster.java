@@ -22,6 +22,7 @@ public class DbCluster {
     private DbEndpoint endpoint;
     private DbEndpoint readerEndpoint;
     private boolean iamDatabaseAuthenticationEnabled;
+    private boolean httpEndpointEnabled;
     private List<String> dbClusterMembers = new ArrayList<>();
     // The member that holds the writer role. Null on a cluster persisted before the role was
     // modelled, in which case the first member is the writer, as it always was reported.
@@ -213,6 +214,9 @@ public class DbCluster {
 
     public int getContainerPort() { return containerPort; }
     public void setContainerPort(int containerPort) { this.containerPort = containerPort; }
+
+    public boolean isHttpEndpointEnabled() { return httpEndpointEnabled; }
+    public void setHttpEndpointEnabled(boolean httpEndpointEnabled) { this.httpEndpointEnabled = httpEndpointEnabled; }
 
     public Double getServerlessV2MinCapacity() { return serverlessV2MinCapacity; }
     public void setServerlessV2MinCapacity(Double serverlessV2MinCapacity) { this.serverlessV2MinCapacity = serverlessV2MinCapacity; }

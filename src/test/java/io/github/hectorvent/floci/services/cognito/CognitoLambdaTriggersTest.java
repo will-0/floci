@@ -1219,6 +1219,20 @@ class CognitoLambdaTriggersTest {
         assertFalse(claims.containsKey("scope"), "suppressing the only scope leaves no scope claim: " + claims);
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"V1_0", "V2_0", "V3_0"})
+    void preTokenGenerationUsesDeclaredEventVersion(String version) throws Exception {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreTokenGenerationConfig", Map.of(
+                "LambdaArn", "arn:aws:lambda:::versioned-pre-token", "LambdaVersion", version)));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+        ArgumentCaptor<byte[]> event = ArgumentCaptor.forClass(byte[].class);
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::versioned-pre-token"), event.capture(), any()))
+                .thenReturn(ok(Map.of()));
+        service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH", Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        assertEquals(version.substring(1, 2), MAPPER.readTree(event.getValue()).path("version").asText());
+    }
+
     @Test
     @SuppressWarnings("unchecked")
     void preTokenGenerationV2ResolvesArnFromPreTokenGenerationConfigKey() {

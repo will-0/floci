@@ -4645,6 +4645,27 @@ public class RdsService implements Resettable, ResourceProvider {
                         "DB cluster " + id + " not found.", 404));
     }
 
+    public synchronized DbCluster setHttpEndpointEnabled(String resourceArn, String region, boolean enabled) {
+        if (resourceArn == null || !resourceArn.startsWith("arn:")) {
+            throw new AwsException("InvalidParameterValue", "ResourceArn must identify a DB cluster.", 400);
+        }
+        String effectiveRegion = effectiveRegion(region);
+        DbCluster cluster;
+        String id;
+        try {
+            id = clusterIdentifierFromArnOrName(resourceArn, effectiveRegion);
+            cluster = getDbCluster(id, effectiveRegion);
+        } catch (AwsException e) {
+            if ("DBClusterNotFoundFault".equals(e.getErrorCode())) {
+                throw new AwsException("ResourceNotFoundFault", "DB cluster not found.", 404);
+            }
+            throw e;
+        }
+        cluster.setHttpEndpointEnabled(enabled);
+        putClusterForScope(currentAccountId(), effectiveRegion, id, cluster);
+        return cluster;
+    }
+
     public Collection<DbCluster> listDbClusters(String filterId) {
         return listDbClusters(filterId, regionResolver.getDefaultRegion());
     }

@@ -3,10 +3,12 @@ package io.github.hectorvent.floci.services.cloudfront;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudfront.model.CacheBehavior;
+import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontFunction;
 import io.github.hectorvent.floci.services.cloudfront.model.DefaultCacheBehavior;
 import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
 import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.services.cloudfront.model.KeyGroup;
+import io.github.hectorvent.floci.services.cloudfront.model.KeyValueStore;
 import io.github.hectorvent.floci.services.cloudfront.model.Origin;
 import io.github.hectorvent.floci.services.cloudfront.model.PublicKey;
 import io.github.hectorvent.floci.services.cloudfront.model.ResponseHeadersPolicy;
@@ -59,6 +61,33 @@ class CloudFrontDistributionServingTest {
 
     @Inject
     CloudFrontService cloudFrontService;
+
+    @Inject CloudFrontKeyValueService keyValues;
+
+    @Test
+    void viewerRequestFunctionReadsKvsAndServesReleaseObject() {
+        String suffix = suffix();
+        String bucket = "cf-function-" + suffix;
+        createBucket(bucket);
+        putObject(bucket, "abcdef123456/index.html", "RELEASE-SHELL", "text/html");
+        KeyValueStore kvs = keyValues.create("releases-" + suffix, "release routing");
+        keyValues.write(kvs.arn, kvs.etag, Map.of("release", "abcdef123456"), List.of());
+        CloudFrontFunction function = new CloudFrontFunction();
+        function.setName("router-" + suffix);
+        function.setRuntime("cloudfront-js-2.0");
+        function.setKeyValueStoreArns(List.of(kvs.arn));
+        function.setFunctionCode("import cf from 'cloudfront'; const kvs=cf.kvs(); async function handler(e) { const release=await kvs.get('release'); e.request.uri='/' + release + '/index.html'; return e.request; }");
+        function = cloudFrontService.createFunction(function);
+        cloudFrontService.publishFunction(function.getName(), function.getEtag());
+        DistributionConfig cfg = new DistributionConfig();
+        cfg.setEnabled(true);
+        cfg.setOrigins(List.of(s3Origin("content", bucket)));
+        DefaultCacheBehavior behavior = defaultBehavior("content");
+        behavior.setFunctionAssociations(List.of(Map.of("EventType", "viewer-request", "FunctionARN", cloudFrontService.arn("function/" + function.getName()))));
+        cfg.setDefaultCacheBehavior(behavior);
+        Distribution dist = cloudFrontService.createDistribution(distribution(cfg), Map.of());
+        given().header("Host", dist.getDomainName()).get("/requests").then().statusCode(200).body(equalTo("RELEASE-SHELL"));
+    }
 
     @Test
     void servesRootObjectSubdirSpaFallbackAndPathRouting() {

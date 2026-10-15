@@ -397,7 +397,7 @@ as it is.
 - `CopyDistribution` (staging distributions)
 - Real-time log configs (`CreateRealtimeLogConfig`, etc.)
 - Field-level encryption (`CreateFieldLevelEncryptionConfig`, etc.)
-- `TestFunction` execution (function is stored, not executed)
+- The management `TestFunction` operation (published viewer-request associations execute during delivery)
 - Streaming distributions (RTMP — deprecated by AWS)
 - VPC origins, Anycast IP lists, key value stores
 - Monitoring subscriptions
@@ -407,3 +407,15 @@ as it is.
 - Forwarding POST, PUT, PATCH and DELETE to S3 origins. AWS passes them to S3, which evaluates them
   against the bucket policy (OAC supports `PUT` and `DELETE`); Floci's in-process S3 origin answers
   them with 403 `Access Denied`, as S3 does for a request that holds no write grant.
+
+## Key-value stores and viewer-request functions
+
+CloudFront key-value stores support the REST XML control plane and REST JSON data plane
+(Describe, GetKey, PutKey, DeleteKey, UpdateKeys and ListKeys). Writes require the current ETag.
+Store contents persist through the CloudFront storage backend. CloudFront Functions can associate
+stores and read them through `cloudfront.kvs()` during viewer-request execution.
+
+The JVM runtime executes published JavaScript viewer-request functions with GraalJS, including
+async KVS reads, URI rewriting, generated responses and explicit origin selection. It provides no
+host filesystem, process or network access to function code. This is an execution compatibility
+layer, not an implementation of CloudFront's instruction quotas or every runtime built-in.

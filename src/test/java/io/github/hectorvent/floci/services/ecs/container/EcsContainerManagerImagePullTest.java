@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.RuntimePlatform;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -31,11 +32,13 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -76,6 +79,35 @@ class EcsContainerManagerImagePullTest {
                 mock(ContainerDetector.class), config, mock(RegionResolver.class), awsEnv,
                 mock(SsmService.class), mock(SecretsManagerService.class), mock(S3Service.class),
                 ecrRegistryManager, mock(HostVolumePolicy.class));
+    }
+
+    @Test
+    void declaredPlatformReachesEveryImagePullAndContainerCreation() {
+        TaskDefinition definition = taskDefinition();
+        definition.setRuntimePlatform(new RuntimePlatform("X86_64", "LINUX"));
+        when(lifecycleManager.resolveImageForLaunch(APP_IMAGE, ImagePullBehavior.ALWAYS, "linux/amd64"))
+                .thenReturn(new LaunchImage(APP_IMAGE_ID, "sha256:amd64-manifest"));
+        when(lifecycleManager.resolveImageForLaunch(SIDECAR_IMAGE, ImagePullBehavior.ALWAYS, "linux/amd64"))
+                .thenReturn(new LaunchImage(SIDECAR_IMAGE_ID, null));
+        when(lifecycleManager.createAndStart(any(), eq("linux/amd64")))
+                .thenReturn(new ContainerInfo("docker-id", Map.of()));
+        EcsTask task = task();
+        manager.startTask(task, definition, List.of(), "us-east-1");
+        verify(lifecycleManager).resolveImageForLaunch(APP_IMAGE, ImagePullBehavior.ALWAYS, "linux/amd64");
+        verify(lifecycleManager).resolveImageForLaunch(SIDECAR_IMAGE, ImagePullBehavior.ALWAYS, "linux/amd64");
+        verify(lifecycleManager, times(2)).createAndStart(any(), eq("linux/amd64"));
+        verify(lifecycleManager, never()).createAndStart(any());
+        assertEquals("sha256:amd64-manifest", task.getContainers().getFirst().getImageDigest());
+    }
+
+    @Test
+    void mapsDeclaredArchitecturesAndPreservesDaemonDefaultWhenUnspecified() {
+        TaskDefinition definition = taskDefinition();
+        assertNull(EcsContainerManager.dockerPlatform(definition));
+        definition.setRuntimePlatform(new RuntimePlatform("ARM64", "LINUX"));
+        assertEquals("linux/arm64", EcsContainerManager.dockerPlatform(definition));
+        definition.setRuntimePlatform(new RuntimePlatform("X86_64", "WINDOWS_SERVER_2022_CORE"));
+        assertEquals("windows/amd64", EcsContainerManager.dockerPlatform(definition));
     }
 
     @Test

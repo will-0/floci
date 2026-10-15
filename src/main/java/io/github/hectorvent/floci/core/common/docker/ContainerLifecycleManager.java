@@ -118,7 +118,11 @@ public class ContainerLifecycleManager {
      * @return information about the created container including resolved endpoints and published ports
      */
     public ContainerInfo createAndStart(ContainerSpec spec) {
-        String containerId = create(spec);
+        return createAndStart(spec, null);
+    }
+
+    public ContainerInfo createAndStart(ContainerSpec spec, String platform) {
+        String containerId = platform == null ? create(spec) : create(spec, platform);
         try {
             ContainerInfo info = startCreated(containerId, spec);
             return withPublishedHostPorts(info, spec);
@@ -138,6 +142,10 @@ public class ContainerLifecycleManager {
      */
     public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior) {
         return imageCacheService.resolveForLaunch(image, behavior);
+    }
+
+    public LaunchImage resolveImageForLaunch(String image, ImagePullBehavior behavior, String platform) {
+        return imageCacheService.resolveForLaunch(image, behavior, platform);
     }
 
     /**

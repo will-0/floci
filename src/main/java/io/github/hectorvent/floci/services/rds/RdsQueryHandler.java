@@ -125,6 +125,8 @@ public class RdsQueryHandler {
                 case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params, region);
                 case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params, region);
                 case "DeleteDBSubnetGroup" -> handleDeleteDbSubnetGroup(params, region);
+                case "EnableHttpEndpoint" -> handleHttpEndpoint(params, region, true);
+                case "DisableHttpEndpoint" -> handleHttpEndpoint(params, region, false);
                 case "CreateDBCluster" -> handleCreateDbCluster(params, region);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params, region);
                 case "DeleteDBCluster" -> handleDeleteDbCluster(params, region);
@@ -1222,11 +1224,22 @@ public class RdsQueryHandler {
                     throw e;
                 }
             }
+            if ("true".equalsIgnoreCase(params.getFirst("EnableHttpEndpoint"))) {
+                cluster = service.setHttpEndpointEnabled(cluster.getDbClusterArn(), region, true);
+            }
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
+    }
+
+    private Response handleHttpEndpoint(MultivaluedMap<String, String> params, String region, boolean enabled) {
+        DbCluster cluster = service.setHttpEndpointEnabled(params.getFirst("ResourceArn"), region, enabled);
+        String result = new XmlBuilder().elem("ResourceArn", cluster.getDbClusterArn())
+                .elem("HttpEndpointEnabled", cluster.isHttpEndpointEnabled()).build();
+        return Response.ok(AwsQueryResponse.envelope(
+                enabled ? "EnableHttpEndpoint" : "DisableHttpEndpoint", AwsNamespaces.RDS, result)).build();
     }
 
     private static Double parseDoubleParam(MultivaluedMap<String, String> params, String name) {
@@ -2917,7 +2930,8 @@ public class RdsQueryHandler {
             xml.elem("EarliestRestorableTime", c.getCreatedAt().toString())
                .elem("LatestRestorableTime", Instant.now().toString());
         }
-        xml.elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
+        xml.elem("HttpEndpointEnabled", c.isHttpEndpointEnabled())
+           .elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
            .elem("MultiAZ", c.isMultiAz())
            .elem("StorageEncrypted", c.isStorageEncrypted())
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())

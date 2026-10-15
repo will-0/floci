@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -59,11 +61,16 @@ class ContainerLifecycleManagerStartFailureTest {
                 dockerClient, imageCacheService, containerDetector, portAllocator, config));
     }
 
-    @Test
-    void createAndStartRemovesCreatedContainerWhenStartFails() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createAndStartRemovesCreatedContainerWhenStartFails(boolean explicitPlatform) {
         RuntimeException startFailure =
                 new RuntimeException("Bind for 0.0.0.0:80 failed: port is already allocated");
-        doReturn("container-id").when(manager).create(spec);
+        if (explicitPlatform) {
+            doReturn("container-id").when(manager).create(spec, "linux/amd64");
+        } else {
+            doReturn("container-id").when(manager).create(spec);
+        }
         doThrow(startFailure).when(manager).startCreated("container-id", spec);
 
         RemoveContainerCmd removeCmd = mock(RemoveContainerCmd.class);
@@ -71,20 +78,31 @@ class ContainerLifecycleManagerStartFailureTest {
         when(removeCmd.withForce(true)).thenReturn(removeCmd);
 
         RuntimeException thrown = assertThrows(RuntimeException.class,
-                () -> manager.createAndStart(spec));
+                () -> {
+                    if (explicitPlatform) {
+                        manager.createAndStart(spec, "linux/amd64");
+                    } else {
+                        manager.createAndStart(spec);
+                    }
+                });
 
         assertSame(startFailure, thrown, "original start failure must propagate");
         verify(removeCmd).exec();
     }
 
-    @Test
-    void createAndStartDoesNotRemoveContainerOnSuccess() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void createAndStartDoesNotRemoveContainerOnSuccess(boolean explicitPlatform) {
         ContainerLifecycleManager.ContainerInfo info =
                 new ContainerLifecycleManager.ContainerInfo("container-id", Map.of());
-        doReturn("container-id").when(manager).create(spec);
+        if (explicitPlatform) {
+            doReturn("container-id").when(manager).create(spec, "linux/amd64");
+        } else {
+            doReturn("container-id").when(manager).create(spec);
+        }
         doReturn(info).when(manager).startCreated("container-id", spec);
 
-        assertSame(info, manager.createAndStart(spec));
+        assertSame(info, explicitPlatform ? manager.createAndStart(spec, "linux/amd64") : manager.createAndStart(spec));
 
         verify(dockerClient, never()).removeContainerCmd(any(String.class));
     }

@@ -65,6 +65,23 @@ class RdsQueryHandlerTest {
     }
 
     @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void httpEndpointActionsReturnClusterArnAndState(boolean enabled) {
+        String arn = "arn:aws:rds:us-east-1:000000000000:cluster:local";
+        DbCluster cluster = new DbCluster();
+        cluster.setDbClusterArn(arn);
+        cluster.setHttpEndpointEnabled(enabled);
+        when(service.setHttpEndpointEnabled(arn, "us-east-1", enabled)).thenReturn(cluster);
+        MultivaluedMap<String, String> p = params();
+        p.putSingle("ResourceArn", arn);
+        Response response = handler.handle(enabled ? "EnableHttpEndpoint" : "DisableHttpEndpoint", p, "us-east-1");
+        assertEquals(200, response.getStatus());
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<ResourceArn>" + arn + "</ResourceArn>"));
+        assertTrue(body.contains("<HttpEndpointEnabled>" + enabled + "</HttpEndpointEnabled>"));
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"CreateEventSubscription", "ModifyEventSubscription"})
     void eventSubscriptionEnabledRejectsMalformedValuesBeforeServiceCalls(String action) {
         for (String invalid : List.of("yes", "", " true ")) {

@@ -1,0 +1,20 @@
+name: Fork image
+
+# Publishes the fork's JVM image for every pushed commit, so consumers can pin it by digest.
+on:
+  push:
+    branches: [main, 'claude/**']
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  image:
+    if: github.repository != 'floci-io/floci'
+    uses: ./.github/workflows/build-images.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      source-ref: ${{ github.sha }}
+      image: ghcr.io/${{ github.repository_owner }}/floci

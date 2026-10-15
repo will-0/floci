@@ -3,10 +3,14 @@ package io.github.hectorvent.floci.services.cloudfront.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.List;
 
 @RegisterForReflection
 public class CloudFrontFunction {
 
+    private List<String> keyValueStoreArns = List.of();
+    public List<String> getKeyValueStoreArns() { return keyValueStoreArns; }
+    public void setKeyValueStoreArns(List<String> arns) { keyValueStoreArns = arns; }
     private String name;
     private String stage;
     private String status;

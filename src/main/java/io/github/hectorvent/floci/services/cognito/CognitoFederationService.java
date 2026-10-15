@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationCode;
 import io.github.hectorvent.floci.services.cognito.model.CognitoAuthorizationTransaction;
@@ -95,8 +97,30 @@ public class CognitoFederationService {
         JsonNode claims = oidcClient.fetchClaims(provider, accessToken);
         String subject = requiredText(claims, "sub", "subject");
         String issuer = optionalText(claims, "iss");
+        JsonNode attributes = claims;
+        if (cognitoService.hasInboundFederation(transaction.userPoolId())) {
+            JsonNode idToken = oidcClient.verifyIdToken(provider, tokenResponse, transaction.nonce());
+            String tokenSubject = optionalText(idToken, "sub");
+            if (tokenSubject != null && !tokenSubject.equals(subject)) {
+                throw new AwsException("NotAuthorizedException", "Identity provider subjects do not match", 400);
+            }
+            if (tokenSubject != null) {
+                issuer = requiredText(idToken, "iss", "issuer");
+            }
+            ObjectMapper mapper = new ObjectMapper();
+            Map<String, Object> raw = new LinkedHashMap<>(mapper.convertValue(claims, new TypeReference<Map<String, Object>>() {}));
+            raw.putAll(mapper.convertValue(idToken, new TypeReference<Map<String, Object>>() {}));
+            Map<String, String> original = new LinkedHashMap<>();
+            raw.forEach((key, value) -> original.put(key, value instanceof String text ? text : mapper.valueToTree(value).toString()));
+            Map<String, String> transformed = cognitoService.inboundFederation(transaction.userPoolId(),
+                    transaction.clientId(), provider, subject, Map.of("tokenResponse", mapper.convertValue(tokenResponse,
+                            new TypeReference<Map<String, Object>>() {}), "idToken", mapper.convertValue(idToken,
+                            new TypeReference<Map<String, Object>>() {}), "userInfo", mapper.convertValue(claims,
+                            new TypeReference<Map<String, Object>>() {})), original);
+            attributes = mapper.valueToTree(transformed);
+        }
         CognitoUser user = cognitoService.provisionFederatedUser(transaction.userPoolId(), provider,
-                subject, issuer, mapAttributes(provider, claims));
+                subject, issuer, mapAttributes(provider, attributes));
         CognitoAuthorizationCode authorizationCode = new CognitoAuthorizationCode(
                 transaction.userPoolId(), transaction.clientId(), user.getUsername(), transaction.redirectUri(),
                 transaction.scopes(), transaction.nonce(), transaction.codeChallenge(),

@@ -23,6 +23,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.core.storage.WriteProfile;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.guardduty.GuardDutyScanner;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator;
 import io.github.hectorvent.floci.services.iam.IamPolicyEvaluator.ResourcePolicyDecision;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -247,6 +248,9 @@ public class S3Service implements Resettable, ResourceProvider {
     private final Instance<LambdaService> lambdaServiceProvider;
     private final LambdaInvoker lambdaInvoker;
     private final EventBridgeService eventBridgeService;
+    @Inject
+    Instance<GuardDutyScanner> malwareScanner;
+
     private final Event<S3ObjectUpdatedEvent> s3UpdatedEvent;
     private final RegionResolver regionResolver;
     private final String baseUrl;
@@ -5540,6 +5544,16 @@ public class S3Service implements Resettable, ResourceProvider {
      */
     private void fireNotifications(String bucketName, String key, String eventName, S3Object obj,
                                    String sequencer) {
+        if (obj != null && eventName.startsWith("ObjectCreated")
+                && malwareScanner != null && malwareScanner.isResolvable()) {
+            String account = resolveBucketEntry(bucketName).orElseThrow().account();
+            String region = resolveBucket(bucketName).orElseThrow().getRegion();
+            String version = obj.getVersionId();
+            String generation = obj.getDataGeneration();
+            malwareScanner.get().submit(account, region, bucketName, key, obj.getSize(),
+                    () -> openObjectStream(bucketName, key, version),
+                    status -> setMalwareScanStatus(account, bucketName, key, version, generation, status));
+        }
         if (s3UpdatedEvent != null && eventName.startsWith("ObjectCreated")) {
             s3UpdatedEvent.fire(new S3ObjectUpdatedEvent(bucketName, key));
         }
@@ -5617,6 +5631,32 @@ public class S3Service implements Resettable, ResourceProvider {
             } catch (Exception e) {
                 LOG.warnv("Failed to deliver S3 event to EventBridge: {0}", e.getMessage());
             }
+        }
+    }
+
+    private void setMalwareScanStatus(String account, String bucketName, String key,
+                                      String version, String generation, String status) {
+        Bucket bucket;
+        if (bucketStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<Bucket> typed = (AccountAwareStorageBackend<Bucket>) aware;
+            bucket = typed.getForAccount(account, bucketName).orElse(null);
+        } else {
+            bucket = bucketStore.get(bucketName).orElse(null);
+        }
+        if (bucket == null) {
+            return;
+        }
+        synchronized (bucket) {
+            String storageKey = version != null ? versionedKey(bucketName, key, version) : objectKey(bucketName, key);
+            S3Object stored = resolveObjectForAccount(account, storageKey).orElse(null);
+            if (stored == null || !Objects.equals(generation, stored.getDataGeneration())) {
+                return;
+            }
+            Map<String, String> tags = new HashMap<>(stored.getTags() != null ? stored.getTags() : Map.of());
+            tags.put("GuardDutyMalwareScanStatus", status);
+            stored.setTags(tags);
+            putObjectMetadataForAccount(account, bucketName, key, stored, bucket);
         }
     }
 
@@ -6066,6 +6106,11 @@ public class S3Service implements Resettable, ResourceProvider {
         Bucket bucket = resolveBucket(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+        putObjectMetadataForAccount(accountId, bucketName, key, object, bucket);
+    }
+
+    private void putObjectMetadataForAccount(String accountId, String bucketName, String key,
+                                             S3Object object, Bucket bucket) {
         synchronized (bucket) {
             String latestKey = objectKey(bucketName, key);
             String versionId = object.getVersionId();

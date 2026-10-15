@@ -287,6 +287,23 @@ class RdsServiceTest {
                 binding.getValue());
     }
 
+    @Test
+    void httpEndpointStatePersistsInClusterStorageAndRejectsForeignArns() throws Exception {
+        DbCluster cluster = rdsService.createDbCluster("http-cluster", "aurora-postgresql", null,
+                "admin", "password", "dbname", false, null);
+        String arn = cluster.getDbClusterArn();
+        assertFalse(cluster.isHttpEndpointEnabled());
+        rdsService.setHttpEndpointEnabled(arn, "us-east-1", true);
+        DbCluster stored = rdsService.getDbCluster("http-cluster", "us-east-1");
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules();
+        assertTrue(mapper.readValue(mapper.writeValueAsBytes(stored), DbCluster.class).isHttpEndpointEnabled());
+        rdsService.setHttpEndpointEnabled(arn, "us-east-1", false);
+        assertFalse(rdsService.getDbCluster("http-cluster", "us-east-1").isHttpEndpointEnabled());
+        AwsException error = assertThrows(AwsException.class,
+                () -> rdsService.setHttpEndpointEnabled(arn, "eu-west-2", true));
+        assertEquals("ResourceNotFoundFault", error.getErrorCode());
+    }
+
     @ParameterizedTest
     @CsvSource({
             "aurora-postgresql, create", "aurora-postgresql, reboot", "aurora-postgresql, retry",

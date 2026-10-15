@@ -35,6 +35,23 @@ class Route53ServiceTest {
 
     private final Map<String, AccountAwareStorageBackend<?>> stores = new HashMap<>();
 
+    @Test
+    void serviceAliasLookupUsesExplicitResourceOwner() {
+        Route53Service service = newService();
+        String zone = service.createHostedZone("example.test", "native-alias", null, null).zone().getId();
+        ResourceRecordSet record = new ResourceRecordSet();
+        record.setName("origin.example.test.");
+        record.setType("A");
+        AliasTarget target = new AliasTarget();
+        target.setDnsName("native.elb.localhost.floci.io.");
+        target.setHostedZoneId("ZELB");
+        record.setAliasTarget(target);
+        service.changeResourceRecordSets(zone, List.of(Map.of("action", "CREATE", "rrs", record)), null);
+        assertEquals(target.getDnsName(), service.findAliasTarget(ACCOUNT, "ORIGIN.example.test"));
+        assertEquals(null, service.findAliasTarget("111111111111", "origin.example.test"));
+        assertEquals(null, service.findAliasTarget(ACCOUNT, "127.0.0.1"));
+    }
+
     private Route53Service newService() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
         Mockito.when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))

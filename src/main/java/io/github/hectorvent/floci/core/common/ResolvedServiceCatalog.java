@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentC
 import io.github.hectorvent.floci.services.bedrockagentcorecontrol.BedrockAgentCoreToolsController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontController;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontKeyValueController;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontKeyValueDataController;
 import io.github.hectorvent.floci.services.cloudfront.CloudFrontServingController;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactMavenController;
 import io.github.hectorvent.floci.services.codeartifact.CodeArtifactPypiController;
@@ -630,8 +632,8 @@ public class ResolvedServiceCatalog {
                         "cloudfront", storageMode(config.storage().services().cloudfront().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.CLOUDFRONT, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
-                        Set.of(), Set.of("cloudfront"), Set.of(),
-                        Set.of(CloudFrontController.class, CloudFrontServingController.class)),
+                        Set.of(), Set.of("cloudfront", "cloudfront-keyvaluestore"), Set.of(),
+                        Set.of(CloudFrontController.class, CloudFrontServingController.class, CloudFrontKeyValueController.class, CloudFrontKeyValueDataController.class)),
                 descriptor("appsync", "appsync", config.services().appsync().enabled(), true,
                         "appsync", storageMode(config.storage().services().appsync().mode(), config.storage().mode()),
                         config.storage().services().appsync().flushIntervalMs(), null, ServiceProtocol.REST_JSON,

@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.ecs.model.FirelensConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.LogConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
+import io.github.hectorvent.floci.services.ecs.model.RuntimePlatform;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -32,6 +33,8 @@ import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
 
@@ -47,6 +50,7 @@ import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
 import static org.mockito.Mockito.RETURNS_SELF;
@@ -108,8 +112,9 @@ class EcsContainerManagerFirelensTest {
                 mock(SecretsManagerService.class), s3Service, ecrRegistryManager, new HostVolumePolicy(config));
     }
 
-    @Test
-    void startsRouterFirstAndWiresAwsfirelensToUnixSocket() {
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void startsRouterFirstAndWiresAwsfirelensToUnixSocket(boolean declaredPlatform) {
         ContainerDefinition router = new ContainerDefinition();
         router.setName("log_router");
         router.setImage("amazon/aws-for-fluent-bit:stable");
@@ -133,12 +138,26 @@ class EcsContainerManagerFirelensTest {
         task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/abc123");
         task.setClusterArn("arn:aws:ecs:us-east-1:000000000000:cluster/test-cluster");
 
+        if (declaredPlatform) {
+            taskDef.setRuntimePlatform(new RuntimePlatform("X86_64", "LINUX"));
+            when(lifecycleManager.resolveImageForLaunch(any(), any(), eq("linux/amd64")))
+                    .thenAnswer(invocation -> new LaunchImage(invocation.getArgument(0), null));
+            when(lifecycleManager.create(any(), eq("linux/amd64"))).thenReturn("router-id");
+            when(lifecycleManager.createAndStart(any(), eq("linux/amd64")))
+                    .thenReturn(new ContainerInfo("app-id", Map.of()));
+        }
         EcsTaskHandle handle = manager.startTask(task, taskDef, null, "us-east-1");
 
         InOrder order = inOrder(lifecycleManager);
-        order.verify(lifecycleManager).create(any(ContainerSpec.class));
-        order.verify(lifecycleManager).startCreated(anyString(), any());
-        order.verify(lifecycleManager).createAndStart(any(ContainerSpec.class));
+        if (declaredPlatform) {
+            order.verify(lifecycleManager).create(any(ContainerSpec.class), eq("linux/amd64"));
+            order.verify(lifecycleManager).startCreated(anyString(), any());
+            order.verify(lifecycleManager).createAndStart(any(ContainerSpec.class), eq("linux/amd64"));
+        } else {
+            order.verify(lifecycleManager).create(any(ContainerSpec.class));
+            order.verify(lifecycleManager).startCreated(anyString(), any());
+            order.verify(lifecycleManager).createAndStart(any(ContainerSpec.class));
+        }
 
         ArgumentCaptor<LogConfig> logConfig = ArgumentCaptor.forClass(LogConfig.class);
         verify(builder).withLogConfig(logConfig.capture());

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
+import io.github.hectorvent.floci.services.elbv2.model.LoadBalancer;
 import io.vertx.core.Promise;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
@@ -127,6 +128,25 @@ class ElbV2ReservedPortTest {
         assertDoesNotThrow(() -> dataPlane.startListener(listener, "us-west-2", List.of()),
                 "the released-port replay re-entered the server map for the key it was computing");
         verify(vertx, times(1)).createHttpServer(any(HttpServerOptions.class));
+    }
+
+    @Test
+    void registeredListenerOnControlPlanePortIsNeverANativeCloudFrontOrigin() {
+        ElbV2DataPlane dataPlane = dataPlaneWith(4566, false, 443);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElbV2ServiceConfig elbConfig = mock(EmulatorConfig.ElbV2ServiceConfig.class);
+        when(dataPlane.config.services()).thenReturn(services);
+        when(services.elbv2()).thenReturn(elbConfig);
+        dataPlane.elbV2Service = mock(ElbV2Service.class);
+        LoadBalancer lb = new LoadBalancer();
+        lb.setDnsName("native.elb.localhost.floci.io");
+        Listener listener = new Listener();
+        listener.setListenerArn("arn:aws:elasticloadbalancing:us-east-1:000000000000:listener/app/lb/1/2");
+        listener.setLoadBalancerArn("arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/lb/1");
+        listener.setPort(4566);
+        when(dataPlane.elbV2Service.getLoadBalancer("us-east-1", listener.getLoadBalancerArn())).thenReturn(lb);
+        dataPlane.startListener(listener, "us-east-1", List.of());
+        assertFalse(dataPlane.isNativeOrigin(lb.getDnsName(), lb.getDnsName(), 4566, "000000000000"));
     }
 
     @Test

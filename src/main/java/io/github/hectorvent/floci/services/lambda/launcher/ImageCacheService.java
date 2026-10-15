@@ -101,17 +101,23 @@ public class ImageCacheService {
      * moves the tag again cannot change what this one runs.
      */
     public LaunchImage resolveForLaunch(String imageUri, ImagePullBehavior behavior) {
+        return resolveForLaunch(imageUri, behavior, null);
+    }
+
+    public LaunchImage resolveForLaunch(String imageUri, ImagePullBehavior behavior, String platform) {
         if (isImageId(imageUri)) {
             return new LaunchImage(existingImageId(imageUri), null);
         }
-        ImageKey imageKey = new ImageKey(imageUri, daemonPlatform());
+        String explicitPlatform = platform != null && !platform.isBlank() ? platform.trim() : null;
+        ImageKey imageKey = new ImageKey(imageUri, explicitPlatform != null ? explicitPlatform : daemonPlatform());
         Object lock = locks.computeIfAbsent(imageUri, k -> new Object());
         synchronized (lock) {
             LocalImage image = switch (behavior) {
-                case DEFAULT -> pullOrUseCached(imageKey);
-                case ALWAYS -> pull(imageKey, null);
-                case ONCE -> pulledImages.contains(imageKey) ? cachedOrPull(imageKey) : pull(imageKey, null);
-                case PREFER_CACHED -> cachedOrPull(imageKey);
+                case DEFAULT -> pullOrUseCached(imageKey, explicitPlatform);
+                case ALWAYS -> pull(imageKey, explicitPlatform);
+                case ONCE -> pulledImages.contains(imageKey)
+                        ? cachedOrPull(imageKey, explicitPlatform) : pull(imageKey, explicitPlatform);
+                case PREFER_CACHED -> cachedOrPull(imageKey, explicitPlatform);
             };
             String imageId = resolvedImageReference(imageUri, image.image());
             resolvedImages.put(imageKey, imageId);
@@ -144,9 +150,9 @@ public class ImageCacheService {
         return resolvedImageReference(imageId, image);
     }
 
-    private LocalImage pullOrUseCached(ImageKey imageKey) {
+    private LocalImage pullOrUseCached(ImageKey imageKey, String platform) {
         try {
-            return pull(imageKey, null);
+            return pull(imageKey, platform);
         } catch (RuntimeException e) {
             InspectImageResponse cached = Thread.currentThread().isInterrupted() ? null : cachedImage(imageKey);
             if (cached == null) {
@@ -158,9 +164,9 @@ public class ImageCacheService {
         }
     }
 
-    private LocalImage cachedOrPull(ImageKey imageKey) {
+    private LocalImage cachedOrPull(ImageKey imageKey, String platform) {
         InspectImageResponse cached = cachedImage(imageKey);
-        return cached != null ? new LocalImage(cached, null) : pull(imageKey, null);
+        return cached != null ? new LocalImage(cached, null) : pull(imageKey, platform);
     }
 
     private InspectImageResponse cachedImage(ImageKey imageKey) {

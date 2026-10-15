@@ -312,4 +312,12 @@ class RegionResolverTest {
             @Override public int getLength() { return 0; }
         };
     }
+    @Test
+    void sigV4aRegionlessCredentialDoesNotTreatServiceAsRegion() {
+        RegionResolver resolver = new RegionResolver("eu-west-2", "000000000000");
+        String authorization = "AWS4-ECDSA-P256-SHA256 Credential=test/20261015/cloudfront-keyvaluestore/aws4_request, SignedHeaders=host, Signature=test";
+        assertEquals("eu-west-2", resolver.resolveRegionFromAuth(authorization));
+        assertNull(resolver.resolveRegionFromAuthOrNull(authorization));
+        assertEquals("eu-west-2", resolver.resolveRegionFromPresignedCredential("test/20261015/cloudfront-keyvaluestore/aws4_request"));
+    }
 }

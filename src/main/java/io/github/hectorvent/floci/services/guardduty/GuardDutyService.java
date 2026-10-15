@@ -32,6 +32,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
@@ -411,6 +412,22 @@ public class GuardDutyService {
         plan.setTags(tags);
         malwareProtectionPlanStore.put(storageKey(region, plan.getId()), plan);
         return plan;
+    }
+
+    public Optional<MalwareProtectionPlan> protectionForObject(String accountId, String region, String bucket, String key) {
+        List<MalwareProtectionPlan> plans;
+        if (malwareProtectionPlanStore instanceof AccountAwareStorageBackend<?> aware) {
+            @SuppressWarnings("unchecked")
+            AccountAwareStorageBackend<MalwareProtectionPlan> typed =
+                    (AccountAwareStorageBackend<MalwareProtectionPlan>) aware;
+            plans = typed.scanForAccount(accountId, entry -> entry.startsWith(region + "::"));
+        } else {
+            plans = malwareProtectionPlanStore.scan(entry -> entry.startsWith(region + "::"));
+        }
+        return plans.stream().filter(plan -> "ACTIVE".equals(plan.getStatus())
+                && bucket.equals(plan.getBucketName())
+                && (plan.getObjectPrefixes().isEmpty()
+                    || plan.getObjectPrefixes().stream().anyMatch(key::startsWith))).findFirst();
     }
 
     public MalwareProtectionPlan getMalwareProtectionPlan(String region, String planId) {

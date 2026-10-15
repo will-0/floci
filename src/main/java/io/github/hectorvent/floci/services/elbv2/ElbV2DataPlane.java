@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.config.TlsProxyServer;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
@@ -359,6 +360,18 @@ public class ElbV2DataPlane {
      * of inventing a Floci-only knob. A lone listener on the port still answers anything, so a
      * single load balancer needs no hostname at all.
      */
+    /** Verifies that a CloudFront origin reaches a registered listener in the distribution's account. */
+    public boolean isNativeOrigin(String dnsName, String requestHost, int port, String accountId) {
+        HttpServer server = servers.get(port);
+        if (server == null || server.actualPort() != port || isReservedByFloci(port)) {
+            return false;
+        }
+        String listenerArn = resolveListenerArn(port, requestHost);
+        ListenerBinding binding = listenerArn != null ? listenerBindings.get(listenerArn) : null;
+        return binding != null && binding.host().equals(normalizeHost(dnsName))
+                && accountId.equals(AwsArnUtils.parse(binding.loadBalancerArn()).accountId());
+    }
+
     private String resolveListenerArn(int port, String hostHeader) {
         Map<String, String> listenersByHost = listenersByHostAndPort.get(port);
         if (listenersByHost == null || listenersByHost.isEmpty()) {

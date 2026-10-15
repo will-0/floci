@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudfront;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RequestHost;
 import io.github.hectorvent.floci.services.cloudfront.model.CloudFrontOriginAccessIdentity;
@@ -102,10 +103,13 @@ public class CloudFrontServingController {
     /** Viewer methods that can carry a request body and that CloudFront never caches. */
     private static final Set<String> BODY_METHODS = Set.of("POST", "PUT", "PATCH", "DELETE");
 
+    @Inject CloudFrontFunctionRuntime functionRuntime;
+    @Inject CloudFrontNativeOriginResolver nativeOrigins;
     private final CloudFrontService service;
     private final S3Service s3Service;
     private final CurrentVertxRequest currentVertxRequest;
     private final CloudFrontOriginHttpClient httpClient;
+    private final CloudFrontOriginHttpClient nativeHttpClient;
 
     @Inject
     public CloudFrontServingController(CloudFrontService service, S3Service s3Service,
@@ -114,6 +118,7 @@ public class CloudFrontServingController {
         this.service = service;
         this.s3Service = s3Service;
         this.currentVertxRequest = currentVertxRequest;
+        this.nativeHttpClient = new CloudFrontOriginHttpClient(List.of("127.0.0.1"));
         this.httpClient = new CloudFrontOriginHttpClient(
                 emulatorConfig.services().cloudfront().allowedPrivateOriginHosts().orElse(List.of()));
     }
@@ -122,6 +127,7 @@ public class CloudFrontServingController {
     void closeHttpClient() {
         try {
             httpClient.close();
+            nativeHttpClient.close();
         } catch (Exception e) {
             LOG.debugv("Could not close CloudFront origin HTTP client: {0}", e.getMessage());
         }
@@ -298,9 +304,22 @@ public class CloudFrontServingController {
             }
         }
 
+        CloudFrontFunctionRuntime.Result transformed;
+        try {
+            transformed = functionRuntime.viewerRequest(config, normalized,
+                    functionRequest(rawViewerPath, method, viewerHost));
+        } catch (RuntimeException e) {
+            LOG.debug("CloudFront function failed", e);
+            return textError(502, "CloudFront function failed.");
+        }
+        if (transformed.value().containsKey("statusCode")) {
+            return functionResponse(transformed.value(), includeBody);
+        }
+        rawViewerPath = transformed.value().getOrDefault("uri", rawViewerPath).toString();
+        decodedViewerPath = decodedViewerPath(rawViewerPath);
         OriginResponse origin = route(dist, normalized, rawViewerPath, decodedViewerPath,
                 viewerScheme, viewerAuthorization, method, viewerOrigin,
-                accessControlRequestMethod, accessControlRequestHeaders, viewerBody);
+                accessControlRequestMethod, accessControlRequestHeaders, viewerBody, transformed.originId());
 
         if (origin.status() >= 400) {
             Response fallback;
@@ -316,6 +335,32 @@ public class CloudFrontServingController {
             }
         }
         return toResponse(origin, includeBody, directives);
+    }
+
+    private Map<String, Object> functionRequest(String uri, String method, String host) {
+        Map<String, Object> headers = new LinkedHashMap<>();
+        Map<String, Object> cookies = new LinkedHashMap<>();
+        Map<String, Object> query = new LinkedHashMap<>();
+        HttpServerRequest current = currentVertxRequest.getCurrent().request();
+        current.headers().forEach(entry -> headers.put(entry.getKey().toLowerCase(Locale.ROOT), Map.of("value", entry.getValue())));
+        headers.put("host", Map.of("value", host));
+        String cookie = current.getHeader("Cookie");
+        if (cookie != null) for (String pair : cookie.split(";")) {
+            String[] parts = pair.trim().split("=", 2);
+            if (parts.length == 2) cookies.put(parts[0], Map.of("value", parts[1]));
+        }
+        current.params().forEach(entry -> query.put(entry.getKey(), Map.of("value", entry.getValue())));
+        return new LinkedHashMap<>(Map.of("uri", uri, "method", method, "headers", headers, "cookies", cookies, "querystring", query));
+    }
+
+    @SuppressWarnings("unchecked")
+    private Response functionResponse(Map<String, Object> value, boolean includeBody) {
+        Response.ResponseBuilder response = Response.status(Integer.parseInt(value.get("statusCode").toString()));
+        ((Map<String, Map<String, Object>>) value.getOrDefault("headers", Map.of())).forEach((name, field) -> response.header(name, field.get("value")));
+        ((Map<String, Map<String, Object>>) value.getOrDefault("cookies", Map.of())).forEach((name, field) ->
+                response.header("Set-Cookie", name + "=" + field.get("value") + (field.containsKey("attributes") ? "; " + field.get("attributes") : "")));
+        if (includeBody && value.containsKey("body")) response.entity(value.get("body"));
+        return response.build();
     }
 
     /** Resolves the response-headers policy for a behavior into the headers it contributes, if any. */
@@ -453,9 +498,9 @@ public class CloudFrontServingController {
                                  String method, String viewerOrigin,
                                  String accessControlRequestMethod,
                                  String accessControlRequestHeaders,
-                                 ViewerBody viewerBody) {
+                                 ViewerBody viewerBody, String selectedOriginId) {
         DistributionConfig config = distribution.getConfig();
-        String originId = CloudFrontRequestRouter.matchTargetOriginId(config, normalized);
+        String originId = selectedOriginId == null ? CloudFrontRequestRouter.matchTargetOriginId(config, normalized) : selectedOriginId;
         Origin origin = CloudFrontRequestRouter.findOrigin(config, originId);
         if (origin == null) {
             return OriginResponse.error(502, "No origin matched the request.");
@@ -485,7 +530,7 @@ public class CloudFrontServingController {
                 CloudFrontOriginRequestBuilder.build(viewerRequest(method, viewerScheme),
                         forwarding(config, normalized), distribution.getDomainName());
         return fetchFromCustomOrigin(
-                origin, forwardUri, originRequest, viewerScheme, method, viewerBody);
+                distribution, origin, forwardUri, originRequest, viewerScheme, method, viewerBody);
     }
 
     /** The live viewer request, with CloudFront's signing parameters removed from its query. */
@@ -752,16 +797,14 @@ public class CloudFrontServingController {
      * Fetches from a custom (non-S3) origin. {@code forwardUri} already includes the origin path;
      * {@code originRequest} carries the forwarded query and headers.
      */
-    private OriginResponse fetchFromCustomOrigin(Origin origin, String forwardUri,
+    private OriginResponse fetchFromCustomOrigin(Distribution distribution, Origin origin, String forwardUri,
                                                  CloudFrontOriginRequestBuilder.OriginRequest originRequest,
                                                  String viewerScheme, String method, ViewerBody viewerBody) {
         boolean includeBody = !"HEAD".equals(method);
         try {
             URI target = buildCustomOriginUri(
                     origin, viewerScheme, forwardUri, originRequest.rawQuery());
-            HttpRequest.Builder rb = HttpRequest.newBuilder()
-                    .uri(target)
-                    .timeout(Duration.ofSeconds(30));
+
             // Origin custom headers: CloudFront adds these to every request it forwards to the origin
             // (overriding any same-named viewer header), which is how a distribution restricts an origin
             // to CloudFront-only traffic via a shared secret header.
@@ -776,11 +819,27 @@ public class CloudFrontServingController {
                     }
                 }
             }
+            String requestHost = originRequest.headers().stream()
+                    .filter(header -> "host".equalsIgnoreCase(header.name()))
+                    .map(CloudFrontOriginRequestBuilder.Header::value).findFirst().orElse(target.getHost() + (target.getPort() >= 0
+                            && target.getPort() != ("https".equals(target.getScheme()) ? 443 : 80)
+                            ? ":" + target.getPort() : ""));
+            boolean nativeOrigin = nativeOrigins != null && nativeOrigins.isNativeOrigin(target, requestHost,
+                    AwsArnUtils.parse(distribution.getArn()).accountId());
+            URI transport = target;
+            if (nativeOrigin) {
+                int port = target.getPort() >= 0 ? target.getPort() : "https".equals(target.getScheme()) ? 443 : 80;
+                transport = URI.create("http://127.0.0.1:" + port + target.getRawPath()
+                        + (target.getRawQuery() != null ? "?" + target.getRawQuery() : ""));
+                originHeaders.put("Host", requestHost);
+                originHeaders.put("X-Forwarded-Proto", target.getScheme());
+            }
+            HttpRequest.Builder rb = HttpRequest.newBuilder().uri(transport).timeout(Duration.ofSeconds(30));
             rb.method(method, HttpRequest.BodyPublishers.noBody());
             // Both bodies are streamed, so neither has to fit in memory: the viewer's goes out with its
             // own Content-Length, or chunked as it came, and the origin's comes back as it arrives.
             ViewerBody requestBody = originRequestBody(method, viewerBody);
-            CloudFrontOriginHttpClient.OpenResponse resp = httpClient.open(rb.build(), originRequest.headers(),
+            CloudFrontOriginHttpClient.OpenResponse resp = (nativeOrigin ? nativeHttpClient : httpClient).open(rb.build(), originRequest.headers(),
                     originHeaders, requestBody != null ? requestBody.stream() : null,
                     requestBody != null ? requestBody.length() : -1);
             String ct = resp.headers().firstValue("content-type").orElse(DEFAULT_CONTENT_TYPE);
@@ -984,7 +1043,7 @@ public class CloudFrontServingController {
         } else {
             String forwardUri = CloudFrontRequestRouter.resolveForwardUri(errOrigin.getOriginPath(), errNormalized, null);
             page = fetchFromCustomOrigin(
-                    errOrigin, forwardUri, CloudFrontOriginRequestBuilder.OriginRequest.empty(),
+                    distribution, errOrigin, forwardUri, CloudFrontOriginRequestBuilder.OriginRequest.empty(),
                     viewerScheme, includeBody ? "GET" : "HEAD", null);
         }
         if (page.status() >= 400) {

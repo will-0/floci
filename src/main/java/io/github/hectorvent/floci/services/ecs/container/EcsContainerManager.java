@@ -237,6 +237,22 @@ public class EcsContainerManager {
                 null, null, null, null, null);
     }
 
+    static String dockerPlatform(TaskDefinition definition) {
+        if (definition.getRuntimePlatform() == null) {
+            return null;
+        }
+        String architecture = definition.getRuntimePlatform().cpuArchitecture();
+        String cpu = architecture == null || "X86_64".equals(architecture) ? "amd64"
+                : "ARM64".equals(architecture) ? "arm64" : null;
+        String family = definition.getRuntimePlatform().operatingSystemFamily();
+        String os = family == null || "LINUX".equals(family) ? "linux"
+                : family.startsWith("WINDOWS_SERVER_") ? "windows" : null;
+        if (cpu == null || os == null) {
+            throw new AwsException("InvalidParameterException", "Unsupported ECS runtimePlatform.", 400);
+        }
+        return os + "/" + cpu;
+    }
+
     /**
      * Starts Docker containers for all container definitions in a task.
      * Updates the task's container list in-place with runtime network bindings and docker IDs.
@@ -244,6 +260,7 @@ public class EcsContainerManager {
     public EcsTaskHandle startTask(EcsTask task, TaskDefinition taskDef,
                                    List<ContainerOverride> containerOverrides, String region) {
         String taskId = extractTaskId(task.getTaskArn());
+        String platform = dockerPlatform(taskDef);
 
         Map<String, String> containerIds = new LinkedHashMap<>();
         Map<String, Closeable> logStreamsByContainerId = new LinkedHashMap<>();
@@ -312,8 +329,11 @@ public class EcsContainerManager {
             // created from the image id its pull resolved to, so a concurrent launch that moves the
             // tag again cannot swap the image under this task's reported digest.
             for (ContainerDefinition def : launchOrder) {
-                LaunchImage launchImage = lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
-                        config.services().ecs().imagePullBehavior());
+                LaunchImage launchImage = platform == null
+                        ? lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
+                                config.services().ecs().imagePullBehavior())
+                        : lifecycleManager.resolveImageForLaunch(imagesByContainer.get(def),
+                                config.services().ecs().imagePullBehavior(), platform);
                 imagesByContainer.put(def, launchImage.imageId());
                 if (launchImage.manifestDigest() != null) {
                     imageDigestsByContainer.put(def.getName(), launchImage.manifestDigest());
@@ -535,7 +555,7 @@ public class EcsContainerManager {
 
                 String dockerId;
                 if (def == firelensRouter) {
-                    dockerId = lifecycleManager.create(spec);
+                    dockerId = platform == null ? lifecycleManager.create(spec) : lifecycleManager.create(spec, platform);
                     try {
                         copyFirelensConfig(dockerId, firelensConfig, isFluentdRouter(firelensRouter),
                                 firelensExternalConfig);
@@ -546,7 +566,8 @@ public class EcsContainerManager {
                     }
                     fluentHost = inspectContainerIp(dockerId);
                 } else {
-                    ContainerInfo info = lifecycleManager.createAndStart(spec);
+                    ContainerInfo info = platform == null
+                            ? lifecycleManager.createAndStart(spec) : lifecycleManager.createAndStart(spec, platform);
                     dockerId = info.containerId();
                 }
 

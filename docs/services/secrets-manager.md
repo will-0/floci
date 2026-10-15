@@ -135,6 +135,12 @@ aws secretsmanager validate-resource-policy \
 
 ## Behaviour notes
 
+- **Metadata-only secrets have no value version.** `CreateSecret` without `SecretString` or
+  `SecretBinary` creates only the secret metadata and omits `VersionId`. `GetSecretValue` returns
+  `ResourceNotFoundException` until a value is written, and `PutSecretValue` creates the first
+  `AWSCURRENT` version. Empty versions persisted by older emulator releases are also treated as
+  missing values.
+
 - **Rotation schedules fire.** A background sweep (see the config table) rotates any secret whose
   `NextRotationDate` has passed. `AutomaticallyAfterDays`, `rate()` and `cron()` are all honoured.
 - **`RotateSecret` also needs `lambda:InvokeFunction` under IAM enforcement.** As on AWS, the caller

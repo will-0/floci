@@ -577,6 +577,8 @@ and `SupportsBabelfish` as false. `ExportableLogTypes` and `SupportedFeatureName
 documented log types and IAM role feature names. `EngineVersion` takes an exact version or a major version such as `16`, and the
 documented filters (`db-parameter-group-family`, `engine`, `engine-mode`, `engine-version`, `status`)
 apply. Every version is `available`, so `IncludeAll` changes nothing.
+Aurora PostgreSQL 16.3 and 17.4 and the default Aurora MySQL version expose `db.serverless`
+through the orderable-options API for Serverless v2 clusters, whose engine mode is `provisioned`.
 
 `DescribeEngineDefaultParameters` and `DescribeEngineDefaultClusterParameters` accept a family from the
 catalogue (`InvalidParameterValue` otherwise) and return an empty parameter list, consistent with

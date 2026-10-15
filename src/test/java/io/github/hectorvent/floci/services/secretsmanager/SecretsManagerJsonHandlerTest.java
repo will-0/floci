@@ -41,6 +41,14 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void metadataOnlyCreateOmitsVersionId() {
+        ObjectNode request = MAPPER.createObjectNode().put("Name", "metadata-only");
+        Response response = handler.handle("CreateSecret", request, REGION);
+        assertThat(response.getStatus(), is(200));
+        assertThat(((ObjectNode) response.getEntity()).has("VersionId"), is(false));
+    }
+
+    @Test
     void defaultLengthIs32() {
         assertThat(getRandomPassword(MAPPER.createObjectNode()), hasLength(32));
     }
@@ -296,6 +304,7 @@ class SecretsManagerJsonHandlerTest {
     private void createSecret(String name) {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("Name", name);
+        req.put("SecretString", "fixture-value");
         handler.handle("CreateSecret", req, REGION);
     }
 

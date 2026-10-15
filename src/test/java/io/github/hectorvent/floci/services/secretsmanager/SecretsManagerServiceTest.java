@@ -41,6 +41,27 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void metadataOnlySecretWaitsForItsFirstValue() {
+        Secret secret = service.createSecret("metadata-only", null, null, null, null, null, REGION);
+        assertNull(secret.getCurrentVersionId());
+        assertTrue(secret.getVersions().isEmpty());
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getSecretValue("metadata-only", null, null, REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+        service.putSecretValue("metadata-only", "first-value", null, null, REGION, null);
+        assertEquals("first-value", service.getSecretValue("metadata-only", null, null, REGION).getSecretString());
+    }
+
+    @Test
+    void persistedEmptyVersionDoesNotCountAsSecretValue() {
+        Secret secret = service.createSecret("old-placeholder", "value", null, null, null, null, REGION);
+        secret.getVersions().get(secret.getCurrentVersionId()).setSecretString(null);
+        AwsException missing = assertThrows(AwsException.class,
+                () -> service.getSecretValue("old-placeholder", null, null, REGION));
+        assertEquals("ResourceNotFoundException", missing.getErrorCode());
+    }
+
+    @Test
     void createSecret() {
         Secret secret = service.createSecret("my-secret", "super-secret-value",
                 null, "A test secret", null, null, REGION);

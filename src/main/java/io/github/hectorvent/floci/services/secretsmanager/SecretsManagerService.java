@@ -218,7 +218,9 @@ public class SecretsManagerService implements ResourceProvider {
         version.setCreatedDate(now);
 
         Map<String, SecretVersion> versions = new HashMap<>();
-        versions.put(versionId, version);
+        if (secretString != null || secretBinary != null) {
+            versions.put(versionId, version);
+        }
 
         Secret secret = new Secret();
         secret.setName(name);
@@ -230,7 +232,7 @@ public class SecretsManagerService implements ResourceProvider {
         secret.setLastChangedDate(now);
         secret.setTags(tags != null ? new ArrayList<>(tags) : new ArrayList<>());
         secret.setVersions(versions);
-        secret.setCurrentVersionId(versionId);
+        secret.setCurrentVersionId(versions.isEmpty() ? null : versionId);
         secret.setOwningService(owningService);
 
         store.put(storageKey, secret);
@@ -263,6 +265,11 @@ public class SecretsManagerService implements ResourceProvider {
                 throw new AwsException("ResourceNotFoundException",
                         "Secrets Manager can't find the specified secret value for staging label: " + stage, 400);
             }
+        }
+
+        if (version.getSecretString() == null && version.getSecretBinary() == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Secrets Manager can't find the specified secret value.", 400);
         }
 
         version.setLastAccessedDate(Instant.now());

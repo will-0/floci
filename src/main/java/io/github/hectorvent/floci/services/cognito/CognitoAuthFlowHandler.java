@@ -1630,7 +1630,7 @@ final class CognitoAuthFlowHandler {
         String region = regionForPool(pool);
 
         Map<String, Object> event = new HashMap<>();
-        event.put("version", "1");
+        event.put("version", triggerVersion(pool, triggerKey));
         event.put("region", region);
         event.put("userPoolId", pool.getId());
         event.put("userName", user == null ? null : user.getUsername());
@@ -1639,7 +1639,7 @@ final class CognitoAuthFlowHandler {
                 "clientId", client == null ? CLIENT_ID_NOT_APPLICABLE : client.getClientId()));
         event.put("triggerSource", triggerSource);
         Map<String, Object> req = new HashMap<>(request);
-        if (user != null) {
+        if (user != null && !"InboundFederation".equals(triggerKey)) {
             Map<String, String> userAttributes = new LinkedHashMap<>();
             if (user.getAttributes() != null) {
                 userAttributes.putAll(user.getAttributes());
@@ -2111,11 +2111,64 @@ final class CognitoAuthFlowHandler {
         return firePreTokenGeneration(pool, client, user, Map.of(), "TokenGeneration_HostedAuth", scopes);
     }
 
+    boolean hasInboundFederation(UserPool pool) {
+        return resolveTriggerArn(pool, "InboundFederation") != null;
+    }
+
+    Map<String, String> fireInboundFederation(UserPool pool, UserPoolClient client, CognitoUser user,
+                                            String providerName, String providerType,
+                                            Map<String, Object> attributes, Map<String, String> original) {
+        TriggerResult result = invokeTrigger(pool, client, user, "InboundFederation",
+                "InboundFederation_ExternalProvider", Map.of("providerName", providerName,
+                        "providerType", providerType, "attributes", attributes));
+        if (!result.configured()) {
+            return original;
+        }
+        if (result.errored()) {
+            throw blockingTriggerFailure(result, "InboundFederation");
+        }
+        Object mapped = result.response().get("userAttributesToMap");
+        if (!(mapped instanceof Map<?, ?> values)) {
+            throw customAuthTriggerFailure("InvalidLambdaResponseException",
+                    "InboundFederation requires response.userAttributesToMap");
+        }
+        if (values.isEmpty()) {
+            return original;
+        }
+        Map<String, String> transformed = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : values.entrySet()) {
+            if (!(entry.getKey() instanceof String key) || !(entry.getValue() instanceof String value)) {
+                throw customAuthTriggerFailure("InvalidLambdaResponseException",
+                        "InboundFederation userAttributesToMap must contain strings");
+            }
+            transformed.put(key, value);
+        }
+        return transformed;
+    }
+
+    private static String triggerVersion(UserPool pool, String triggerKey) {
+        if (!"PreTokenGeneration".equals(triggerKey)) {
+            return "1";
+        }
+        Object config = pool.getLambdaConfig().get("PreTokenGenerationConfig");
+        if (config instanceof Map<?, ?> settings) {
+            return switch (String.valueOf(settings.get("LambdaVersion"))) {
+                case "V2_0" -> "2";
+                case "V3_0" -> "3";
+                default -> "1";
+            };
+        }
+        return "1";
+    }
+
     private static String resolveTriggerArn(UserPool pool, String triggerKey) {
         Map<String, Object> cfg = pool.getLambdaConfig();
         if (cfg == null) return null;
         Object v = cfg.get(triggerKey);
         if (v instanceof String s && !s.isBlank()) return s;
+        if (v instanceof Map<?, ?> settings && settings.get("LambdaArn") instanceof String arn && !arn.isBlank()) {
+            return arn;
+        }
         // V2 form: PreTokenGeneration is configured under "PreTokenGenerationConfig"
         // as { LambdaArn, LambdaVersion } (UpdateUserPool / UpdateUserPoolClient
         // API). Fall through so callers using the V1 key still work, and pick up

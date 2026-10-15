@@ -1060,6 +1060,25 @@ public interface EmulatorConfig {
     interface GuardDutyServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        MalwareScanConfig malwareScan();
+    }
+
+    interface MalwareScanConfig {
+        @WithDefault("false")
+        boolean enabled();
+
+        @WithDefault("clamav/clamav-debian:1.4.6")
+        String image();
+
+        @WithDefault("120")
+        int scanTimeoutSeconds();
+
+        @WithDefault("300")
+        int startupTimeoutSeconds();
+
+        @WithDefault("104857600")
+        long maxBytes();
     }
 
     interface EmrServerlessServiceConfig {

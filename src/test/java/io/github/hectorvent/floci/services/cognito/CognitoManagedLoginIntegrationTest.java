@@ -745,7 +745,7 @@ class CognitoManagedLoginIntegrationTest {
         String poolId = cognitoJson("CreateUserPool", "{\"PoolName\":\"FederatedOnlyPool\"}").path("UserPool").path("Id").asText();
         cognitoJson("CreateIdentityProvider", """
                 {"UserPoolId":"%s","ProviderName":"ExampleOidc","ProviderType":"OIDC",
-                 "ProviderDetails":{"authorize_url":"https://idp.example.test/authorize","client_id":"idp-client","attributes_request_method":"GET","oidc_issuer":"https://idp.example.test"}}
+                 "ProviderDetails":{"authorize_url":"https://idp.example.test/authorize","client_id":"idp-client","attributes_request_method":"GET","oidc_issuer":"https://idp.example.test","token_url":"https://idp.example.test/token","attributes_url":"https://idp.example.test/userinfo","jwks_uri":"https://idp.example.test/jwks"}}
                 """.formatted(poolId));
         String clientId = cognitoJson("CreateUserPoolClient", """
                 {"UserPoolId":"%s","ClientName":"federated-only","AllowedOAuthFlowsUserPoolClient":true,

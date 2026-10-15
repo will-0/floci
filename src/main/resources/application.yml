@@ -901,6 +901,9 @@ floci:
       enabled: true
     guardduty:
       enabled: true
+      malware-scan:
+        enabled: false             # FLOCI_SERVICES_GUARDDUTY_MALWARE_SCAN_ENABLED; real clamd backend
+        # image, scan-timeout-seconds, startup-timeout-seconds, max-bytes: EmulatorConfig defaults
     emrserverless:
       enabled: true
     ssoadmin:

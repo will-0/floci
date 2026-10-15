@@ -566,6 +566,23 @@ public class Route53Service implements Resettable {
         return zone.getOwnerAccountId() != null ? zone.getOwnerAccountId() : defaultAccountId;
     }
 
+    /** Resolves an alias for an AWS service resource's owner, independent of viewer credentials. */
+    public String findAliasTarget(String accountId, String dnsName) {
+        String name = normalizeName(dnsName);
+        for (OwnedZone owned : allHostedZonesAcrossAccounts()) {
+            if (!accountId.equals(owned.accountId())) {
+                continue;
+            }
+            for (ResourceRecordSet record : getRecordsForZoneAcrossAccounts(accountId, owned.zone().getId())) {
+                if (name.equalsIgnoreCase(normalizeName(record.getName())) && record.getAliasTarget() != null
+                        && ("A".equals(record.getType()) || "AAAA".equals(record.getType()))) {
+                    return record.getAliasTarget().getDnsName();
+                }
+            }
+        }
+        return null;
+    }
+
     private OwnedZone getHostedZoneAcrossAccounts(String zoneId) {
         if (zoneStore instanceof AccountAwareStorageBackend<?> rawAccountAware) {
             @SuppressWarnings("unchecked")

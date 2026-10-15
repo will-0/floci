@@ -170,6 +170,18 @@ class RdsCatalogueReadIntegrationTest {
     }
 
     @Test
+    void auroraPostgres17ExposesServerlessV2WithoutChangingDefaultVersion() {
+        query("DescribeOrderableDBInstanceOptions").formParam("Engine", "aurora-postgresql")
+                .formParam("EngineVersion", "17.4").formParam("DBInstanceClass", "db.serverless")
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<DBInstanceClass>db.serverless</DBInstanceClass>"))
+                .body(containsString("<EngineVersion>17.4</EngineVersion>"));
+        query("DescribeDBEngineVersions").formParam("Engine", "aurora-postgresql").formParam("DefaultOnly", "true")
+                .when().post("/").then().statusCode(200)
+                .body(containsString("<EngineVersion>16.3</EngineVersion>"));
+    }
+
+    @Test
     void orderableOptionsComeFromTheSameCatalogue() {
         query("DescribeOrderableDBInstanceOptions").formParam("Engine", "mysql")
         .when().post("/").then().statusCode(200)

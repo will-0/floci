@@ -160,6 +160,8 @@ public class CognitoService implements ResourceProvider {
                                   List<String> iamRolesToOverride,
                                   String preferredRole) {}
 
+    @Inject CognitoOidcClient oidcClient;
+
     private final StorageBackend<String, UserPool> poolStore;
     private final StorageBackend<String, UserPoolClient> clientStore;
     private final StorageBackend<String, ResourceServer> resourceServerStore;
@@ -1566,7 +1568,7 @@ public class CognitoService implements ResourceProvider {
             provider.setUserPoolId(userPoolId);
             provider.setProviderName(providerName);
             provider.setProviderType(providerType);
-            provider.setProviderDetails(copyOrEmpty(providerDetails));
+            provider.setProviderDetails(resolveOidcDetails(providerType, copyOrEmpty(providerDetails)));
             // AWS supplies a default mapping only when the member is absent; an explicitly
             // empty map is stored as given.
             provider.setAttributeMapping(attributeMapping == null
@@ -1611,7 +1613,7 @@ public class CognitoService implements ResourceProvider {
                                     + " does not exist.", 400)));
 
             if (providerDetails != null) {
-                provider.setProviderDetails(new LinkedHashMap<>(providerDetails));
+                provider.setProviderDetails(resolveOidcDetails(provider.getProviderType(), providerDetails));
             }
             if (attributeMapping != null) {
                 provider.setAttributeMapping(new LinkedHashMap<>(attributeMapping));
@@ -1630,6 +1632,14 @@ public class CognitoService implements ResourceProvider {
             describeIdentityProvider(userPoolId, providerName);
             identityProviderStore.delete(identityProviderKey(userPoolId, providerName));
         }
+    }
+
+    private Map<String, String> resolveOidcDetails(String type, Map<String, String> details) {
+        if (!"OIDC".equals(type)) {
+            return new LinkedHashMap<>(details);
+        }
+        CognitoOidcClient client = oidcClient != null ? oidcClient : new CognitoOidcClient(MAPPER);
+        return client.discoverProviderDetails(details);
     }
 
     private void validateProviderType(String providerType) {
@@ -2847,6 +2857,23 @@ public class CognitoService implements ResourceProvider {
                 .filter(user -> providerName.equals(user.getFederatedProviderName())
                         && subject.equals(user.getFederatedSubject()))
                 .findFirst();
+    }
+
+    boolean hasInboundFederation(String userPoolId) {
+        return authFlowHandler.hasInboundFederation(describeUserPool(userPoolId));
+    }
+
+    Map<String, String> inboundFederation(String userPoolId, String clientId, IdentityProvider provider,
+                                          String subject, Map<String, Object> attributes,
+                                          Map<String, String> original) {
+        UserPool pool = describeUserPool(userPoolId);
+        CognitoUser user = findFederatedUser(userPoolId, provider.getProviderName(), subject).orElseGet(() -> {
+            CognitoUser candidate = new CognitoUser();
+            candidate.setUsername(provider.getProviderName() + "_" + subject);
+            return candidate;
+        });
+        return authFlowHandler.fireInboundFederation(pool, findClientById(clientId), user,
+                provider.getProviderName(), provider.getProviderType(), attributes, original);
     }
 
     public CognitoUser provisionFederatedUser(String userPoolId, IdentityProvider provider, String subject,

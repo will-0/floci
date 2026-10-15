@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig.EcsServiceConfig.ImagePu
 import io.github.hectorvent.floci.services.lambda.launcher.ImageCacheService.LaunchImage;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -394,6 +395,38 @@ class ImageCacheServiceTest {
     }
 
     @Test
+    void explicitLaunchPlatformIsPulledOnEveryLaunchAndKeepsTheResolvedDigest() {
+        FakeDaemon daemon = new FakeDaemon();
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:old", REGISTRY_REPO + "@sha256:old-manifest"));
+        ImageCacheService service = newService(daemon.client);
+        assertEquals(new LaunchImage("sha256:old", "sha256:old-manifest"),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ALWAYS, "linux/amd64"));
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:new", REGISTRY_REPO + "@sha256:new-manifest"));
+        assertEquals(new LaunchImage("sha256:new", "sha256:new-manifest"),
+                service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ALWAYS, "linux/amd64"));
+        assertEquals(List.of("linux/amd64", "linux/amd64"), daemon.requestedPlatforms);
+    }
+
+    @Test
+    void everyPullPolicyHonoursExplicitArchitectureAndOnceCacheIsSeparatedByPlatform() {
+        for (ImagePullBehavior behavior : ImagePullBehavior.values()) {
+            FakeDaemon daemon = new FakeDaemon();
+            daemon.registry.put(REGISTRY_IMAGE, image("sha256:amd64"));
+            ImageCacheService service = newService(daemon.client);
+            service.resolveForLaunch(REGISTRY_IMAGE, behavior, "linux/amd64");
+            assertEquals(List.of("linux/amd64"), daemon.requestedPlatforms);
+        }
+        FakeDaemon daemon = new FakeDaemon();
+        ImageCacheService service = newService(daemon.client);
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:amd64"));
+        service.resolveForLaunch(REGISTRY_IMAGE, ImagePullBehavior.ONCE, "linux/amd64");
+        daemon.registry.put(REGISTRY_IMAGE, image("sha256:arm64").withArch("arm64"));
+        assertEquals("sha256:arm64", service.resolveForLaunch(REGISTRY_IMAGE,
+                ImagePullBehavior.ONCE, "linux/arm64").imageId());
+        assertEquals(List.of("linux/amd64", "linux/arm64"), daemon.requestedPlatforms);
+    }
+
+    @Test
     void defaultPullBehaviourRunsTheImageAMovedTagNamesNow() {
         FakeDaemon daemon = new FakeDaemon();
         daemon.registry.put(REGISTRY_IMAGE, image("sha256:old", REGISTRY_REPO + "@sha256:old-manifest"));
@@ -634,6 +667,7 @@ class ImageCacheServiceTest {
         final Map<String, InspectImageResponse> registry = new HashMap<>();
         final Map<String, String> registryDigests = new HashMap<>();
         final AtomicInteger pulls = new AtomicInteger();
+        final List<String> requestedPlatforms = new ArrayList<>();
 
         FakeDaemon() {
             when(client.inspectImageCmd(anyString())).thenAnswer(invocation -> {
@@ -652,6 +686,10 @@ class ImageCacheServiceTest {
                 String reference = invocation.getArgument(0);
                 PullImageCmd pull = mock(PullImageCmd.class);
                 when(pull.withAuthConfig(any())).thenReturn(pull);
+                when(pull.withPlatform(anyString())).thenAnswer(call -> {
+                    requestedPlatforms.add(call.getArgument(0));
+                    return pull;
+                });
                 when(pull.exec(any(PullImageResultCallback.class))).thenAnswer(execution -> {
                     pulls.incrementAndGet();
                     InspectImageResponse image = registry.get(reference);

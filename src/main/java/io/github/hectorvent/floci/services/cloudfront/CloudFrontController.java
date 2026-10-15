@@ -13,8 +13,11 @@ import org.jboss.logging.Logger;
 import javax.xml.stream.XMLStreamConstants;
 import javax.xml.stream.XMLStreamException;
 import javax.xml.stream.XMLStreamReader;
+
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -2397,6 +2400,16 @@ public class CloudFrontController {
                 .build();
     }
 
+    private String xmlKeyValueStoreAssociations(CloudFrontFunction fn) {
+        XmlBuilder xml = new XmlBuilder().start("KeyValueStoreAssociations").elem("Quantity", fn.getKeyValueStoreArns().size());
+        if (!fn.getKeyValueStoreArns().isEmpty()) {
+            xml.start("Items");
+            fn.getKeyValueStoreArns().forEach(arn -> xml.start("KeyValueStoreAssociation").elem("KeyValueStoreARN", arn).end("KeyValueStoreAssociation"));
+            xml.end("Items");
+        }
+        return xml.end("KeyValueStoreAssociations").build();
+    }
+
     private String xmlFunctionResponse(CloudFrontFunction fn) {
         return new XmlBuilder()
                 .start("FunctionSummary")
@@ -2405,6 +2418,7 @@ public class CloudFrontController {
                 .start("FunctionConfig")
                 .elem("Comment", fn.getComment() != null ? fn.getComment() : "")
                 .elem("Runtime", fn.getRuntime() != null ? fn.getRuntime() : "cloudfront-js-2.0")
+                .raw(xmlKeyValueStoreAssociations(fn))
                 .end("FunctionConfig")
                 .start("FunctionMetadata")
                 .elem("FunctionARN", service.arn("function/" + fn.getName()))
@@ -3581,7 +3595,16 @@ public class CloudFrontController {
         fn.setName(XmlParser.extractFirst(body, "Name", null));
         fn.setComment(XmlParser.extractFirst(body, "Comment", null));
         fn.setRuntime(XmlParser.extractFirst(body, "Runtime", "cloudfront-js-2.0"));
-        fn.setFunctionCode(XmlParser.extractFirst(body, "FunctionCode", null));
+        String functionCode = XmlParser.extractFirst(body, "FunctionCode", null);
+        if (functionCode != null) {
+            try {
+                functionCode = new String(Base64.getDecoder().decode(functionCode), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException ignored) {
+                // Retain direct source accepted by existing emulator clients.
+            }
+        }
+        fn.setFunctionCode(functionCode);
+        fn.setKeyValueStoreArns(XmlParser.extractAll(body, "KeyValueStoreARN"));
         return fn;
     }
 

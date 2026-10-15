@@ -28,6 +28,17 @@ class Ec2ManagedPrefixListIntegrationTest {
     private static String prefixListId;
 
     @Test
+    void cloudFrontManagedPrefixListIsDiscoverable() {
+        given().formParam("Action", "DescribeManagedPrefixLists")
+                .formParam("Filter.1.Name", "prefix-list-name")
+                .formParam("Filter.1.Value.1", "com.amazonaws.global.cloudfront.origin-facing")
+                .header("Authorization", AUTH_HEADER).post("/").then().statusCode(200)
+                .body("DescribeManagedPrefixListsResponse.prefixListSet.item.prefixListName",
+                        equalTo("com.amazonaws.global.cloudfront.origin-facing"))
+                .body("DescribeManagedPrefixListsResponse.prefixListSet.item.ownerId", equalTo("AWS"));
+    }
+
+    @Test
     @Order(1)
     void createManagedPrefixList() {
         prefixListId = given()

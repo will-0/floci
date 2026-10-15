@@ -1416,6 +1416,7 @@ public class CloudFrontService implements ServerCertificateReferenceProvider {
 
     private static CloudFrontFunction copyFunction(CloudFrontFunction source) {
         CloudFrontFunction copy = new CloudFrontFunction();
+        copy.setKeyValueStoreArns(source.getKeyValueStoreArns());
         copy.setName(source.getName());
         copy.setStage(source.getStage());
         copy.setStatus(source.getStatus());

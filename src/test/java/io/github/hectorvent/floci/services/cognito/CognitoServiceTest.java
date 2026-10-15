@@ -5546,6 +5546,10 @@ class CognitoServiceTest {
                 "client_secret", "secret",
                 "attributes_request_method", "GET",
                 "oidc_issuer", "https://issuer.example.com",
+                "authorize_url", "https://issuer.example.com/authorize",
+                "token_url", "https://issuer.example.com/token",
+                "attributes_url", "https://issuer.example.com/userinfo",
+                "jwks_uri", "https://issuer.example.com/jwks",
                 "authorize_scopes", "openid");
         service.createIdentityProvider(pool.getId(), "CopyOidc", "OIDC", details, null, null);
 

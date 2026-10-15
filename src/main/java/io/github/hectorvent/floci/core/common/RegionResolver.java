@@ -27,7 +27,7 @@ public class RegionResolver {
 
     // Matches: Credential=AKID/20260215/us-west-2/s3/aws4_request
     private static final Pattern CREDENTIAL_REGION_PATTERN =
-            Pattern.compile("Credential=\\S+/\\d{8}/([^/]+)/");
+            Pattern.compile("Credential=[^/\\s]+/\\d{8}/([^/\\s]+)/[^/\\s]+/aws4_request");
 
     // Matches ONLY a real AWS region label immediately after ".execute-api.", e.g.
     //   abc123.execute-api.ap-northeast-2.localhost:4566 -> "ap-northeast-2"
@@ -139,7 +139,7 @@ public class RegionResolver {
             return defaultRegion;
         }
         String[] parts = credentialValue.split("/");
-        if (parts.length >= 3) {
+        if (parts.length >= 5) {
             return withoutPseudoRegion(parts[2]);
         }
         return defaultRegion;

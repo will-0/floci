@@ -226,7 +226,9 @@ public class SecretsManagerJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
         response.put("Name", secret.getName());
-        response.put("VersionId", secret.getCurrentVersionId());
+        if (secret.getCurrentVersionId() != null) {
+            response.put("VersionId", secret.getCurrentVersionId());
+        }
         if (!replicaRegions.isEmpty()) {
             response.set("ReplicationStatus", replicationStatusNode(secret));
         }
