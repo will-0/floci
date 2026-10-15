@@ -29,8 +29,8 @@ public final class SecurityGroupNftCompiler {
      * What sits outside the VPC but not behind its route table. Floci is every AWS-managed data
      * plane that delivers into an ENI (ALB, the RDS and cache proxies), so it may always connect
      * in. A workload may always reach its control endpoints: the Lambda Runtime API and the ECS
-     * credential endpoint. Everything else outside the VPC needs a route to a NAT or internet
-     * gateway, as on AWS. {@link #UNROUTED} keeps the flat behaviour: every destination routed.
+     * credential endpoint. Everything else outside the VPC, AWS's public endpoints included,
+     * needs a route to a NAT or internet gateway, as on AWS. {@link #UNROUTED} keeps the flat behaviour: every destination routed.
      */
     public record ControlPlane(String flociAddress, String runtimePorts, boolean internetRoute) {
         public static final ControlPlane UNROUTED = new ControlPlane(null, null, true);
@@ -88,7 +88,12 @@ public final class SecurityGroupNftCompiler {
             String family = controlPlane.flociAddress().contains(":") ? "ip6" : "ip";
             rules.append("add rule inet floci_sg ingress ").append(family).append(" saddr ")
                     .append(controlPlane.flociAddress()).append(" accept\n");
-            if (controlPlane.runtimePorts() != null) {
+            // Floci also stands in for every public AWS endpoint and load balancer, which its
+            // Docker address cannot express as a CIDR: reachable whenever the subnet routes out.
+            if (controlPlane.internetRoute()) {
+                rules.append("add rule inet floci_sg egress ").append(family).append(" daddr ")
+                        .append(controlPlane.flociAddress()).append(" accept\n");
+            } else if (controlPlane.runtimePorts() != null) {
                 rules.append("add rule inet floci_sg egress ").append(family).append(" daddr ")
                         .append(controlPlane.flociAddress()).append(" tcp dport ")
                         .append(controlPlane.runtimePorts()).append(" accept\n");

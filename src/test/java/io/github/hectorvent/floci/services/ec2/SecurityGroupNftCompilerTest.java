@@ -107,6 +107,8 @@ class SecurityGroupNftCompilerTest {
                 new SecurityGroupNftCompiler.ControlPlane("172.17.0.9", "12000-12499", false));
 
         assertTrue(routed.contains("egress ip daddr 0.0.0.0/0 accept"));
+        assertTrue(routed.contains("egress ip daddr 172.17.0.9 accept"));
+        assertFalse(unrouted.contains("egress ip daddr 172.17.0.9 accept"));
         assertFalse(unrouted.contains("egress ip daddr 0.0.0.0/0 accept"));
         assertTrue(unrouted.contains("egress ip daddr 172.17.0.3 accept"));
         assertTrue(unrouted.contains("prefix \"eni-a no-route\" drop"));
