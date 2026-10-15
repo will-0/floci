@@ -2066,6 +2066,16 @@ class CognitoServiceTest {
     }
 
     @Test
+    void linkedIdentityFederatesAsTheLinkedUser() {
+        UserPool pool = createPoolAndUser();
+
+        service.adminLinkProviderForUser(pool.getId(), "alice", "Google", "google-sub-123");
+
+        assertEquals("alice", service.findFederatedUser(pool.getId(), "Google", "google-sub-123")
+                .orElseThrow().getUsername());
+    }
+
+    @Test
     void adminLinkProviderForUserRejectsMissingSourceFields() {
         UserPool pool = createPoolAndUser();
 

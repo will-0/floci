@@ -2854,8 +2854,10 @@ public class CognitoService implements ResourceProvider {
         describeUserPool(userPoolId);
         String prefix = userPoolId + "::";
         return userStore.scan(key -> key.startsWith(prefix)).stream()
+                // AdminLinkProviderForUser makes the IdP identity sign in as the linked user.
                 .filter(user -> providerName.equals(user.getFederatedProviderName())
-                        && subject.equals(user.getFederatedSubject()))
+                        && subject.equals(user.getFederatedSubject())
+                        || hasLinkedIdentity(user, providerName, subject))
                 .findFirst();
     }
 
