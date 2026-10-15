@@ -34,6 +34,8 @@ public class CacheCluster {
     private String ipDiscovery;
     private boolean atRestEncryptionEnabled;
     private List<String> securityGroupIds = new ArrayList<>();
+    // Persisted only: the SubnetIds a serverless cache's backing cluster was placed by, for a restart.
+    private List<String> subnetIds = new ArrayList<>();
     private Map<String, String> tags = new LinkedHashMap<>();
     private String serverlessCacheName;
     private String ownerAccountId;
@@ -122,6 +124,9 @@ public class CacheCluster {
 
     public List<String> getSecurityGroupIds() { return securityGroupIds; }
     public void setSecurityGroupIds(List<String> securityGroupIds) { this.securityGroupIds = securityGroupIds == null ? new ArrayList<>() : securityGroupIds; }
+
+    public List<String> getSubnetIds() { return subnetIds; }
+    public void setSubnetIds(List<String> subnetIds) { this.subnetIds = subnetIds == null ? new ArrayList<>() : subnetIds; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags == null ? new LinkedHashMap<>() : tags; }

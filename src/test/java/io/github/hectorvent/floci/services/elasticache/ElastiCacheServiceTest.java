@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.PersistentStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
@@ -17,6 +18,7 @@ import io.github.hectorvent.floci.services.elasticache.container.ValkeyClusterFo
 import io.github.hectorvent.floci.services.elasticache.model.AuthMode;
 import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
 import io.github.hectorvent.floci.services.elasticache.model.CacheClusterStatus;
+import io.github.hectorvent.floci.services.elasticache.model.CacheSubnetGroup;
 import io.github.hectorvent.floci.services.elasticache.model.ClusterNode;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUser;
 import io.github.hectorvent.floci.services.elasticache.model.ElastiCacheUserGroup;
@@ -31,9 +33,13 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 
+import java.nio.file.Path;
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -57,6 +63,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doNothing;
 import static org.mockito.Mockito.doReturn;
 import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
@@ -902,6 +909,20 @@ class ElastiCacheServiceTest {
         return storageFactory;
     }
 
+    /** Stores on disk under {@code dir}, as with persistent storage: a second factory over it is the next boot. */
+    private static StorageFactory persistentStorageFactory(Path dir) {
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        Map<String, Object> backends = new ConcurrentHashMap<>();
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv ->
+                backends.computeIfAbsent(inv.getArgument(1, String.class), file -> {
+                    PersistentStorage<String, Object> storage =
+                            new PersistentStorage<>(dir.resolve(file), inv.getArgument(2));
+                    storage.load();
+                    return new AccountAwareStorageBackend<>(storage, null, "000000000000");
+                }));
+        return storageFactory;
+    }
+
     private static ElastiCacheService serviceWith(StorageFactory storageFactory,
                                                   ElastiCacheContainerManager containerManager,
                                                   ElastiCacheProxyManager proxyManager,
@@ -969,6 +990,51 @@ class ElastiCacheServiceTest {
                 restarted.createReplicationGroup("grp2", "test", AuthMode.NO_AUTH, null, "us-east-1");
         assertEquals(16380, next.getProxyPort(),
                 "A restored group's port must be reserved again so new groups cannot take it");
+    }
+
+    @Test
+    void restorePersistedRuntimeReturnsVpcCachesToTheirSubnetAndSecurityGroups(@TempDir Path dataDir) {
+        StorageFactory storageFactory = persistentStorageFactory(dataDir);
+        ElastiCacheContainerManager beforeRestart = mock(ElastiCacheContainerManager.class);
+        when(beforeRestart.vpcEnabled()).thenReturn(true);
+        stubSingleNodeContainer(beforeRestart);
+        ElastiCacheService before = serviceWith(storageFactory, beforeRestart,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+        storageFactory.<CacheSubnetGroup>create("elasticache", "elasticache-subnet-groups.json", null)
+                .put("sng", new CacheSubnetGroup("sng", "test", "vpc-1",
+                        new LinkedHashMap<>(Map.of("subnet-1", "us-east-1a"))));
+        String groupHost = before.createReplicationGroup(new ElastiCacheService.CreateReplicationGroupRequest(
+                "grp", "test", AuthMode.NO_AUTH, null, "us-east-1", "valkey", null, null, null, "sng",
+                null, null, null, null, null, null, null, null, Map.of(), null, List.of("sg-cache")))
+                .getConfigurationEndpoint().address();
+        String serverlessHost = before.createServerlessBacking(new ElastiCacheService.CreateCacheClusterRequest(
+                "serverless-1", "valkey", null, null, 1, null, AuthMode.NO_AUTH, null, null, null, 0,
+                null, null, null, List.of("sg-serverless"), null, null, false, "us-east-1", Map.of(),
+                List.of("subnet-2")), "sc", "000000000000", null).getConfigurationEndpoint().address();
+        assertEquals("grp.000000000000.us-east-1.cache.localhost.floci.io", groupHost);
+        assertEquals("sc.serverless.000000000000.us-east-1.cache.localhost.floci.io", serverlessHost);
+
+        ElastiCacheContainerManager restartedContainers = mock(ElastiCacheContainerManager.class);
+        when(restartedContainers.vpcEnabled()).thenReturn(true);
+        stubSingleNodeContainer(restartedContainers);
+        ElastiCacheService restarted = serviceWith(persistentStorageFactory(dataDir), restartedContainers,
+                mock(ElastiCacheProxyManager.class), mock(ValkeyClusterFormation.class));
+
+        restarted.restorePersistedRuntime().join();
+
+        InOrder groupOrder = inOrder(restartedContainers);
+        groupOrder.verify(restartedContainers).placeInVpc("grp",
+                new ElastiCacheContainerManager.VpcPlacement("subnet-1", List.of("sg-cache"), 16379));
+        groupOrder.verify(restartedContainers).tryStart(eq("grp"), anyString(), any());
+        InOrder serverlessOrder = inOrder(restartedContainers);
+        serverlessOrder.verify(restartedContainers).placeInVpc("serverless-1",
+                new ElastiCacheContainerManager.VpcPlacement("subnet-2", List.of("sg-serverless"), 16380));
+        serverlessOrder.verify(restartedContainers).serveTls("serverless-1", serverlessHost);
+        serverlessOrder.verify(restartedContainers).tryStart(eq("serverless-1"), anyString(), any());
+        assertEquals(groupHost, restarted.getReplicationGroup("grp").getConfigurationEndpoint().address(),
+                "A restored VPC cache must keep the endpoint name Floci's DNS answers in its VPC");
+        assertEquals(serverlessHost, restarted.getServerlessBacking("serverless-1", "000000000000")
+                .getConfigurationEndpoint().address());
     }
 
     @Test

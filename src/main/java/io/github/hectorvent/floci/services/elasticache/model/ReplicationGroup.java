@@ -47,6 +47,8 @@ public class ReplicationGroup {
     private String cacheNodeType;
     private String cacheParameterGroupName;
     private String cacheSubnetGroupName;
+    // Persisted only: the groups a VPC group's backend runs behind, for a restart.
+    private List<String> securityGroupIds = new ArrayList<>();
     private boolean automaticFailoverEnabled;
     private boolean multiAzEnabled;
     private List<ClusterNode> clusterNodes = new ArrayList<>();
@@ -171,6 +173,9 @@ public class ReplicationGroup {
 
     public String getCacheSubnetGroupName() { return cacheSubnetGroupName; }
     public void setCacheSubnetGroupName(String cacheSubnetGroupName) { this.cacheSubnetGroupName = cacheSubnetGroupName; }
+
+    public List<String> getSecurityGroupIds() { return securityGroupIds; }
+    public void setSecurityGroupIds(List<String> securityGroupIds) { this.securityGroupIds = securityGroupIds == null ? new ArrayList<>() : securityGroupIds; }
 
     public boolean isAutomaticFailoverEnabled() { return automaticFailoverEnabled; }
     public void setAutomaticFailoverEnabled(boolean automaticFailoverEnabled) { this.automaticFailoverEnabled = automaticFailoverEnabled; }

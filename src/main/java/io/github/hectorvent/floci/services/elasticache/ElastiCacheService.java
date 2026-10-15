@@ -521,6 +521,8 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
                 : "cache.t4g.micro");
         group.setCacheParameterGroupName(request.cacheParameterGroupName());
         group.setCacheSubnetGroupName(request.cacheSubnetGroupName());
+        group.setSecurityGroupIds(request.securityGroupIds() != null
+                ? new ArrayList<>(request.securityGroupIds()) : null);
         group.setAutomaticFailoverEnabled(Boolean.TRUE.equals(request.automaticFailoverEnabled()));
         group.setMultiAzEnabled(Boolean.TRUE.equals(request.multiAzEnabled()));
         group.setSnapshotWindow(ReplicationGroupSettings.DEFAULT_SNAPSHOT_WINDOW);
@@ -750,16 +752,17 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
 
     /**
      * Reserves the port a cluster-mode-disabled group comes back advertising and marks it
-     * {@code creating} for {@link #restoreSingleNodeGroup}. The endpoint host is re-derived from
-     * configuration rather than replayed from the record, so a group restored under a changed
-     * {@code FLOCI_HOSTNAME} advertises the name this process actually answers to.
+     * {@code creating} for {@link #restoreSingleNodeGroup}. Outside a VPC the endpoint host is
+     * re-derived from configuration rather than replayed from the record, so a group restored under
+     * a changed {@code FLOCI_HOSTNAME} advertises the name this process actually answers to.
      */
     private void reserveSingleNodeGroup(AccountEntry<ReplicationGroup> entry,
                                         List<AccountEntry<ReplicationGroup>> toRestore) {
         ReplicationGroup group = entry.value();
         try {
             group.setProxyPort(reserveOrAllocateProxyPort(group.getProxyPort()));
-            group.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), group.getProxyPort()));
+            group.setConfigurationEndpoint(new Endpoint(restoredEndpointHost(group.getConfigurationEndpoint()),
+                    group.getProxyPort()));
             group.setStatus(ReplicationGroupStatus.CREATING);
             // The reservation above succeeded, so this process owns the port whether or not it is
             // the one the record came back with. Without this the delete path would decline to
@@ -777,8 +780,8 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
      * Reserves the proxy port a standalone cache cluster comes back advertising and marks it
      * {@code creating} for {@link #restoreCacheCluster}, the same pair of steps
      * {@link #reserveSingleNodeGroup} performs for a cluster-mode-disabled group. As there, the
-     * endpoint host is re-derived from configuration rather than replayed, so a cluster restored
-     * under a changed {@code FLOCI_HOSTNAME} advertises the name this process answers to.
+     * endpoint host outside a VPC is re-derived from configuration rather than replayed, so a
+     * cluster restored under a changed {@code FLOCI_HOSTNAME} advertises the name this process answers to.
      *
      * <p>A cluster whose port cannot be reserved is reported {@code restore-failed}, the status
      * AWS models on {@code CacheCluster}; a replication group reports {@code create-failed},
@@ -790,7 +793,7 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
         try {
             Endpoint persisted = cluster.getConfigurationEndpoint();
             int proxyPort = reserveOrAllocateProxyPort(persisted != null ? persisted.port() : 0);
-            cluster.setConfigurationEndpoint(new Endpoint(resolveEndpointHost(), proxyPort));
+            cluster.setConfigurationEndpoint(new Endpoint(restoredEndpointHost(persisted), proxyPort));
             cluster.setCacheClusterStatus(CacheClusterStatus.CREATING);
             recordsHoldingTheirPort.add(recordKey(entry.accountId(), clusterId));
             toRestore.add(entry);
@@ -826,6 +829,7 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
         String clusterId = cluster.getCacheClusterId();
         String image = config.services().elasticache().defaultImage();
         try {
+            containerManager.placeInVpc(clusterId, vpcPlacement(cluster));
             containerManager.serveTls(clusterId, cluster.getServerlessCacheName() != null
                     ? cluster.getConfigurationEndpoint().address() : null);
             ElastiCacheContainerHandle handle = containerManager.tryStart(clusterId, image, regionOf(cluster.getArn()));
@@ -957,6 +961,7 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
         String groupId = group.getReplicationGroupId();
         String image = config.services().elasticache().defaultImage();
         try {
+            containerManager.placeInVpc(groupId, vpcPlacement(group));
             ElastiCacheContainerHandle handle = containerManager.tryStart(groupId, image, regionOf(group.getArn()));
             synchronized (lockFor("rg:" + groupId)) {
                 if (restoreTargetLost(accountId, groupId)) {
@@ -1539,6 +1544,9 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
         cluster.setAtRestEncryptionEnabled(Boolean.TRUE.equals(request.atRestEncryptionEnabled()));
         if (request.securityGroupIds() != null && !request.securityGroupIds().isEmpty()) {
             cluster.setSecurityGroupIds(new ArrayList<>(request.securityGroupIds()));
+        }
+        if (request.subnetIds() != null && !request.subnetIds().isEmpty()) {
+            cluster.setSubnetIds(new ArrayList<>(request.subnetIds()));
         }
     }
 
@@ -2388,6 +2396,28 @@ public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
      */
     private String vpcEndpointHost(String label, String region) {
         return label + "." + regionResolver.getAccountId() + "." + region + VPC_ENDPOINT_SUFFIX;
+    }
+
+    /** A restored backend rejoins its VPC exactly when it was created in one, as its endpoint name records. */
+    private ElastiCacheContainerManager.VpcPlacement vpcPlacement(ReplicationGroup group) {
+        return isVpcEndpoint(group.getConfigurationEndpoint()) ? vpcPlacement(group.getCacheSubnetGroupName(),
+                List.of(), group.getSecurityGroupIds(), regionOf(group.getArn()), group.getProxyPort()) : null;
+    }
+
+    private ElastiCacheContainerManager.VpcPlacement vpcPlacement(CacheCluster cluster) {
+        return isVpcEndpoint(cluster.getConfigurationEndpoint()) ? vpcPlacement(cluster.getCacheSubnetGroupName(),
+                cluster.getSubnetIds(), cluster.getSecurityGroupIds(), regionOf(cluster.getArn()),
+                cluster.getConfigurationEndpoint().port()) : null;
+    }
+
+    /** A restored VPC cache keeps its endpoint name, which Floci's DNS and its TLS certificate answer to. */
+    private String restoredEndpointHost(Endpoint persisted) {
+        return isVpcEndpoint(persisted) ? persisted.address() : resolveEndpointHost();
+    }
+
+    private static boolean isVpcEndpoint(Endpoint endpoint) {
+        return endpoint != null && endpoint.address() != null
+                && endpoint.address().toLowerCase(Locale.ROOT).endsWith(VPC_ENDPOINT_SUFFIX);
     }
 
     @Override
