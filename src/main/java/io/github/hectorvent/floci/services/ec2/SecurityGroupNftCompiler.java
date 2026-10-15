@@ -25,6 +25,20 @@ public final class SecurityGroupNftCompiler {
         }
     }
 
+    /**
+     * What sits outside the VPC but not behind its route table. Floci is every AWS-managed data
+     * plane that delivers into an ENI (ALB, the RDS and cache proxies), so it may always connect
+     * in. A workload may always reach its control endpoints: the Lambda Runtime API and the ECS
+     * credential endpoint. Everything else outside the VPC needs a route to a NAT or internet
+     * gateway, as on AWS. {@link #UNROUTED} keeps the flat behaviour: every destination routed.
+     */
+    public record ControlPlane(String flociAddress, String runtimePorts, boolean internetRoute) {
+        public static final ControlPlane UNROUTED = new ControlPlane(null, null, true);
+    }
+
+    /** NFLOG group the helper's flow logger listens on for dropped packets. */
+    public static final int DROP_LOG_GROUP = 7;
+
     public static String initialRuleset() {
         return "add table inet floci_sg\n"
                 + "add chain inet floci_sg ingress { type filter hook input priority -10; policy drop; }\n"
@@ -38,6 +52,12 @@ public final class SecurityGroupNftCompiler {
 
     public static String compile(Endpoint target, Collection<Endpoint> peers,
                                  Map<String, List<String>> prefixLists, List<String> vpcResolvers) {
+        return compile(target, peers, prefixLists, vpcResolvers, ControlPlane.UNROUTED);
+    }
+
+    public static String compile(Endpoint target, Collection<Endpoint> peers,
+                                 Map<String, List<String>> prefixLists, List<String> vpcResolvers,
+                                 ControlPlane controlPlane) {
         if (target == null || target.groups() == null || target.groups().isEmpty()) {
             throw new IllegalArgumentException("Protected endpoint needs at least one security group");
         }
@@ -62,7 +82,18 @@ public final class SecurityGroupNftCompiler {
         rules.append("add rule inet floci_sg egress udp sport 68 udp dport 67 accept\n")
                 .append("add rule inet floci_sg ingress udp sport 67 udp dport 68 accept\n")
                 .append("add rule inet floci_sg egress ip daddr 169.254.169.254 accept\n")
-                .append("add rule inet floci_sg ingress ip saddr 169.254.169.254 accept\n");
+                .append("add rule inet floci_sg ingress ip saddr 169.254.169.254 accept\n")
+                .append("add rule inet floci_sg egress ip daddr 169.254.170.2 accept\n");
+        if (controlPlane.flociAddress() != null) {
+            String family = controlPlane.flociAddress().contains(":") ? "ip6" : "ip";
+            rules.append("add rule inet floci_sg ingress ").append(family).append(" saddr ")
+                    .append(controlPlane.flociAddress()).append(" accept\n");
+            if (controlPlane.runtimePorts() != null) {
+                rules.append("add rule inet floci_sg egress ").append(family).append(" daddr ")
+                        .append(controlPlane.flociAddress()).append(" tcp dport ")
+                        .append(controlPlane.runtimePorts()).append(" accept\n");
+            }
+        }
 
         List<Endpoint> managed = peers == null ? List.of() : peers.stream()
                 .filter(peer -> !target.eniId().equals(peer.eniId()))
@@ -96,7 +127,13 @@ public final class SecurityGroupNftCompiler {
             // A managed peer must never fall through to a broad external CIDR rule
             // evaluated against its Docker bridge IP instead of its logical ENI address.
             for (Endpoint peer : managed) {
-                appendRule(rules, chain, addressField, peer.transportAddress(), "drop");
+                appendRule(rules, chain, addressField, peer.transportAddress(), dropExpression(target, chain));
+            }
+            // Without a gateway route nothing outside the VPC answers, whatever the groups allow.
+            if (egress && !controlPlane.internetRoute()) {
+                rules.append("add rule inet floci_sg egress ").append(dropExpression(target, "no-route"))
+                        .append('\n');
+                continue;
             }
             for (SecurityGroup group : target.groups()) {
                 List<IpPermission> permissions = egress
@@ -127,8 +164,15 @@ public final class SecurityGroupNftCompiler {
                     }
                 }
             }
+            rules.append("add rule inet floci_sg ").append(chain).append(' ')
+                    .append(dropExpression(target, chain)).append('\n');
         }
         return rules.toString();
+    }
+
+    private static String dropExpression(Endpoint target, String reason) {
+        return "limit rate 10/second log group " + DROP_LOG_GROUP + " prefix \"" + target.eniId() + " "
+                + reason + "\" drop";
     }
 
     private static void appendRule(StringBuilder rules, String chain, String addressField,

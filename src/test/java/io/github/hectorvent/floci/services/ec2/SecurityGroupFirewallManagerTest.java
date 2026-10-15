@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import jakarta.enterprise.inject.Instance;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
@@ -52,7 +53,7 @@ class SecurityGroupFirewallManagerTest {
         when(lifecycleManager.createAndStart(any())).thenThrow(new IllegalStateException("stop after the spec"));
         SecurityGroupFirewallManager manager = new SecurityGroupFirewallManager(dockerClient,
                 new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer), lifecycleManager, config,
-                embeddedDnsServer);
+                embeddedDnsServer, dockerHostResolver, mock(Instance.class));
 
         assertThrows(IllegalStateException.class, () -> manager.createNamespace("ec2", "i-1", "000000000000",
                 "us-east-1", Optional.empty(), Map.of()));
@@ -71,7 +72,8 @@ class SecurityGroupFirewallManagerTest {
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         when(config.dns().containerFallbackServers()).thenReturn(List.of("8.8.8.8", "8.8.4.4"));
         SecurityGroupFirewallManager manager = new SecurityGroupFirewallManager(mock(DockerClient.class),
-                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class), config, embeddedDnsServer);
+                mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class), config, embeddedDnsServer,
+                mock(DockerHostResolver.class), mock(Instance.class));
 
         assertEquals(List.of("172.18.0.2"), manager.vpcResolvers());
 
@@ -106,7 +108,8 @@ class SecurityGroupFirewallManagerTest {
         when(byLegacyKeys.exec()).thenReturn(List.of(legacyOnly, both, disagreeing));
         ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
         SecurityGroupFirewallManager manager = new SecurityGroupFirewallManager(dockerClient,
-                mock(ContainerBuilder.class), lifecycleManager, config, mock(EmbeddedDnsServer.class));
+                mock(ContainerBuilder.class), lifecycleManager, config, mock(EmbeddedDnsServer.class),
+                mock(DockerHostResolver.class), mock(Instance.class));
 
         manager.quarantineSurvivingNamespaces();
 

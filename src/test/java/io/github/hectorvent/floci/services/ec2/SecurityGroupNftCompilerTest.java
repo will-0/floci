@@ -37,7 +37,7 @@ class SecurityGroupNftCompilerTest {
         String nft = SecurityGroupNftCompiler.compile(target, List.of(allowed, denied), Map.of());
 
         assertTrue(nft.contains("ip saddr 172.17.0.3 tcp dport 443 accept"));
-        assertTrue(nft.indexOf("ip saddr 172.17.0.4 drop")
+        assertTrue(nft.indexOf("ip saddr 172.17.0.4 limit rate")
                 < nft.indexOf("ip saddr 172.17.0.0/16 tcp dport 443 accept"));
     }
 
@@ -85,6 +85,33 @@ class SecurityGroupNftCompilerTest {
         assertTrue(nft.contains("egress ip daddr 172.18.0.2 tcp dport 53 accept"));
         assertTrue(nft.contains("egress ip6 daddr fd00::53 udp dport 53 accept"));
         assertFalse(nft.contains("daddr 172.18.0.2 accept"), "only DNS is allowed to the resolver");
+    }
+
+    @Test
+    void anUnroutedSubnetReachesOnlyItsPeersAndTheControlPlane() {
+        SecurityGroup group = new SecurityGroup();
+        group.setVpcId("vpc-1");
+        group.setOwnerId("000000000000");
+        IpPermission anywhere = new IpPermission();
+        anywhere.setIpProtocol("-1");
+        IpRange all = new IpRange();
+        all.setCidrIp("0.0.0.0/0");
+        anywhere.getIpRanges().add(all);
+        group.getIpPermissionsEgress().add(anywhere);
+        SecurityGroupNftCompiler.Endpoint target = endpoint("eni-a", "10.0.0.2", "172.17.0.2", group);
+        SecurityGroupNftCompiler.Endpoint peer = endpoint("eni-b", "10.0.0.3", "172.17.0.3", group);
+
+        String routed = SecurityGroupNftCompiler.compile(target, List.of(peer), Map.of(), List.of(),
+                new SecurityGroupNftCompiler.ControlPlane("172.17.0.9", "12000-12499", true));
+        String unrouted = SecurityGroupNftCompiler.compile(target, List.of(peer), Map.of(), List.of(),
+                new SecurityGroupNftCompiler.ControlPlane("172.17.0.9", "12000-12499", false));
+
+        assertTrue(routed.contains("egress ip daddr 0.0.0.0/0 accept"));
+        assertFalse(unrouted.contains("egress ip daddr 0.0.0.0/0 accept"));
+        assertTrue(unrouted.contains("egress ip daddr 172.17.0.3 accept"));
+        assertTrue(unrouted.contains("prefix \"eni-a no-route\" drop"));
+        assertTrue(unrouted.contains("egress ip daddr 172.17.0.9 tcp dport 12000-12499 accept"));
+        assertTrue(unrouted.contains("ingress ip saddr 172.17.0.9 accept"));
     }
 
     private static SecurityGroupNftCompiler.Endpoint endpoint(String eni, String logical,

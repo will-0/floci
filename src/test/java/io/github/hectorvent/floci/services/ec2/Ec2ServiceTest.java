@@ -3815,13 +3815,13 @@ class Ec2ServiceTest {
         service.createManagedPrefixList("us-east-1", "corp", "IPv4", 5, List.of(), List.of());
 
         List<ManagedPrefixList> east = service.describeManagedPrefixLists("us-east-1", List.of(), Map.of());
-        assertEquals(3, east.size());
+        assertEquals(4, east.size());
         assertTrue(east.stream().anyMatch(l -> "com.amazonaws.us-east-1.s3".equals(l.getPrefixListName())));
         assertTrue(east.stream().anyMatch(l -> "corp".equals(l.getPrefixListName())));
 
-        // The customer list belongs to us-east-1; only the AWS-managed pair shows up elsewhere.
+        // The customer list belongs to us-east-1; only the AWS-managed lists show up elsewhere.
         List<ManagedPrefixList> west = service.describeManagedPrefixLists("us-west-2", List.of(), Map.of());
-        assertEquals(2, west.size());
+        assertEquals(3, west.size());
         assertTrue(west.stream().allMatch(ManagedPrefixList::isAwsManaged));
         assertTrue(west.stream().anyMatch(l -> "com.amazonaws.us-west-2.s3".equals(l.getPrefixListName())));
     }

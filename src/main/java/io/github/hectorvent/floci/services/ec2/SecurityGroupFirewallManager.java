@@ -13,10 +13,12 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.LocallyBuiltHelperImage;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -44,17 +46,22 @@ public class SecurityGroupFirewallManager {
     private final ContainerLifecycleManager lifecycleManager;
     private final EmulatorConfig config;
     private final EmbeddedDnsServer embeddedDnsServer;
+    private final DockerHostResolver dockerHostResolver;
+    private final Instance<Ec2Service> ec2Service;
     private final Map<String, ProtectedEndpoint> endpoints = new HashMap<>();
 
     @Inject
     public SecurityGroupFirewallManager(DockerClient dockerClient, ContainerBuilder containerBuilder,
                                         ContainerLifecycleManager lifecycleManager, EmulatorConfig config,
-                                        EmbeddedDnsServer embeddedDnsServer) {
+                                        EmbeddedDnsServer embeddedDnsServer, DockerHostResolver dockerHostResolver,
+                                        Instance<Ec2Service> ec2Service) {
         this.dockerClient = dockerClient;
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.config = config;
         this.embeddedDnsServer = embeddedDnsServer;
+        this.dockerHostResolver = dockerHostResolver;
+        this.ec2Service = ec2Service;
     }
 
     public boolean enabled() {
@@ -122,7 +129,9 @@ public class SecurityGroupFirewallManager {
                 .withEmbeddedDns()
                 .withHostDockerInternalOnLinux()
                 .withEntrypoint(List.of("sh", "-c"))
-                .withCmd(List.of("exec sleep 2147483647"))
+                // The flow logger prints each packet a drop rule logs, so a blocked call says why.
+                .withCmd(List.of("(tcpdump -i nflog:" + SecurityGroupNftCompiler.DROP_LOG_GROUP
+                        + " -nn -l -q -t 2>/dev/null &) ; exec sleep 2147483647"))
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(service, resourceId, accountId, region))
                 .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_HELPER_LABEL, "true",
                         ContainerStorageHelper.OWNER_LABEL, ContainerStorageHelper.ownerIdentity(config)))
@@ -139,6 +148,7 @@ public class SecurityGroupFirewallManager {
                     .filter(address -> address != null && !address.isBlank())
                     .findFirst().orElseThrow(() -> new IllegalStateException("Firewall helper has no Docker IP"));
             apply(helperId, SecurityGroupNftCompiler.initialRuleset());
+            followDrops(helperId, service + " " + resourceId);
             return new Namespace(helperId, ip);
         } catch (Exception e) {
             if (helperId != null) {
@@ -176,6 +186,22 @@ public class SecurityGroupFirewallManager {
             quarantine(helperId);
             throw e;
         }
+    }
+
+    public void removeHelper(String helperId) {
+        lifecycleManager.removeIfExists(helperId);
+    }
+
+    private void followDrops(String helperId, String owner) {
+        dockerClient.logContainerCmd(helperId).withFollowStream(true).withStdOut(true).withStdErr(true)
+                .exec(new ResultCallback.Adapter<Frame>() {
+                    @Override public void onNext(Frame frame) {
+                        String line = new String(frame.getPayload(), StandardCharsets.UTF_8).strip();
+                        if (!line.isEmpty()) {
+                            LOG.warnv("Network dropped for {0}: {1}", owner, line);
+                        }
+                    }
+                });
     }
 
     public synchronized void unregister(String eniId) {
@@ -226,7 +252,7 @@ public class SecurityGroupFirewallManager {
         for (ProtectedEndpoint protectedEndpoint : new ArrayList<>(endpoints.values())) {
             try {
                 String rules = SecurityGroupNftCompiler.compile(protectedEndpoint.endpoint(), peers,
-                        protectedEndpoint.prefixLists(), vpcResolvers);
+                        protectedEndpoint.prefixLists(), vpcResolvers, controlPlane(protectedEndpoint.endpoint()));
                 apply(protectedEndpoint.helperId(), rules);
             } catch (RuntimeException e) {
                 endpoints.values().forEach(endpoint -> quarantine(endpoint.helperId()));
@@ -264,6 +290,19 @@ public class SecurityGroupFirewallManager {
      */
     List<String> vpcResolvers() {
         return embeddedDnsServer.getServerIp().map(List::of).orElse(List.of());
+    }
+
+    /** Floci's address as workloads see it, and whether the ENI's route table reaches outside. */
+    private SecurityGroupNftCompiler.ControlPlane controlPlane(SecurityGroupNftCompiler.Endpoint endpoint) {
+        String floci = dockerHostResolver.resolve();
+        if (floci == null || !floci.matches("[0-9.]+|[0-9a-fA-F:]+")) {
+            floci = null;
+        }
+        var lambda = config.services().lambda();
+        boolean internet = ec2Service.isUnsatisfied()
+                || ec2Service.get().reachesInternet(endpoint.region(), endpoint.eniId());
+        return new SecurityGroupNftCompiler.ControlPlane(floci,
+                lambda.runtimeApiBasePort() + "-" + lambda.runtimeApiMaxPort(), internet);
     }
 
     private void quarantine(String helperId) {

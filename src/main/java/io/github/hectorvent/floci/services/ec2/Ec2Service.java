@@ -354,6 +354,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
     }
 
     private void notifyRouteTableUpdated(String region, RouteTable routeTable) {
+        reconcileFirewallPolicies(region);
         for (VpcRouteTableListener listener : routeTableListeners) {
             try {
                 listener.onRouteTableUpdated(region, routeTable);
@@ -9374,6 +9375,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
             }
             natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
         }
+        reconcileFirewallPolicies(region);
         return natGateway;
     }
 
@@ -9421,6 +9423,7 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         natGateway.setState("deleted");
         natGateways.delete(key(region, natGatewayId));
         tags.delete(natGatewayId);
+        reconcileFirewallPolicies(region);
         return natGateway;
     }
 
@@ -11009,12 +11012,19 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
      * instance in the account to name there.
      */
     public void holdNetworkInterfaceForService(String region, String networkInterfaceId) {
+        holdNetworkInterfaceForService(region, networkInterfaceId, false);
+    }
+
+    /** As above; {@code requesterManaged} marks an interface AWS creates for the customer. */
+    public void holdNetworkInterfaceForService(String region, String networkInterfaceId,
+                                               boolean requesterManaged) {
         NetworkInterface ni = requireStandaloneNetworkInterface(region, networkInterfaceId);
         if (ni.getAttachment() != null) {
             throw new AwsException("InvalidNetworkInterface.InUse",
                     "Interface: '" + networkInterfaceId + "' is currently in use.", 400);
         }
         ni.setStatus("in-use");
+        ni.setRequesterManaged(requesterManaged);
         networkInterfaces.put(key(region, networkInterfaceId), ni);
     }
 
@@ -11031,6 +11041,36 @@ public class Ec2Service implements ContainerTeardown, ResourceProvider, Resettab
         }
         ni.setStatus("available");
         networkInterfaces.put(key(region, networkInterfaceId), ni);
+    }
+
+    /**
+     * Whether an interface's subnet routes 0.0.0.0/0 through a gateway that serves it: a NAT
+     * gateway always, an internet gateway only for an interface that can hold a public address.
+     * Requester-managed interfaces (Lambda, RDS, ElastiCache) never can, so on AWS an internet
+     * gateway route alone leaves them offline. The main route table covers unassociated subnets.
+     */
+    public boolean reachesInternet(String region, String networkInterfaceId) {
+        NetworkInterface ni = networkInterfaces.get(key(region, networkInterfaceId)).orElse(null);
+        if (ni == null) {
+            return true; // Not a standalone interface Floci tracks routes for (an instance's own).
+        }
+        List<RouteTable> tables = routeTables.scan(k -> k.startsWith(region + "::")).stream()
+                .filter(table -> ni.getVpcId().equals(table.getVpcId())).toList();
+        return tables.stream()
+                .filter(table -> table.getAssociations().stream()
+                        .anyMatch(association -> ni.getSubnetId().equals(association.getSubnetId())))
+                .findFirst()
+                .or(() -> tables.stream().filter(table -> table.getAssociations().stream()
+                        .anyMatch(RouteTableAssociation::isMain)).findFirst())
+                .map(table -> table.getRoutes().stream()
+                        .filter(route -> "0.0.0.0/0".equals(route.getDestinationCidrBlock())
+                                && "active".equals(route.getState()))
+                        .anyMatch(route -> (route.getNatGatewayId() != null
+                                && natGateways.get(key(region, route.getNatGatewayId()))
+                                        .filter(nat -> "available".equals(nat.getState())).isPresent())
+                                || (route.getGatewayId() != null && route.getGatewayId().startsWith("igw-")
+                                        && !ni.isRequesterManaged())))
+                .orElse(false);
     }
 
     /**

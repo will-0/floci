@@ -26,7 +26,9 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Typed;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import io.github.hectorvent.floci.services.ec2.VpcAttachments;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -44,6 +46,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.CancellationException;
@@ -148,6 +151,42 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     @PreDestroy
     void shutdown() {
         volumeCleanupScheduler.shutdownNow();
+    }
+
+    @Inject
+    Instance<VpcAttachments> vpcAttachments;
+    private final Map<String, VpcAttachments.Attachment> vpcNamespaces = new java.util.HashMap<>();
+
+    /**
+     * The namespace a VPC function's containers join. One per subnet and security-group set,
+     * shared by every function with that configuration, like the Hyperplane ENIs AWS uses.
+     */
+    private Optional<String> vpcNetworkMode(LambdaFunction fn, String accountId, String region) {
+        Map<String, Object> vpc = fn.getVpcConfig();
+        if (vpc == null || vpcAttachments == null || vpcAttachments.isUnsatisfied()
+                || !vpcAttachments.get().enabled() || !(vpc.get("SubnetIds") instanceof List<?> subnets)
+                || subnets.isEmpty()) {
+            return Optional.empty();
+        }
+        List<String> groups = vpc.get("SecurityGroupIds") instanceof List<?> ids
+                ? ids.stream().map(String::valueOf).sorted().toList() : List.of();
+        String subnet = String.valueOf(subnets.getFirst());
+        String key = region + "/" + subnet + "/" + String.join(",", groups);
+        synchronized (vpcNamespaces) {
+            VpcAttachments.Attachment attachment = vpcNamespaces.get(key);
+            if (attachment != null && !lifecycleManager.isContainerRunning(attachment.helperId())) {
+                vpcAttachments.get().detach(region, attachment.eni().getNetworkInterfaceId());
+                attachment = null;
+            }
+            if (attachment == null) {
+                String id = "lambda-" + Integer.toHexString(key.hashCode());
+                attachment = vpcAttachments.get().attach("lambda", id, accountId, region, subnet, groups,
+                        "AWS Lambda VPC ENI-" + id, true, config.services().lambda().dockerNetwork(),
+                        Map.of(), Map.of(), null);
+                vpcNamespaces.put(key, attachment);
+            }
+            return Optional.of(attachment.networkMode());
+        }
     }
 
     public ContainerHandle launch(LambdaFunction fn) {
@@ -354,6 +393,11 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             }
             specBuilder.withReadOnlyBind(hostPath, "/opt/aws-config");
         });
+
+        // A function with a VpcConfig runs on its subnet, behind its groups and route table.
+        vpcNetworkMode(fn, lambdaAccountId, lambdaRegion).ifPresent(mode -> specBuilder
+                .withNetworkMode(mode)
+                .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true")));
 
         ContainerSpec spec = specBuilder.build();
 
