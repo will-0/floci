@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.rds;
+package io.github.hectorvent.floci.services.ec2;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.async.ResultCallback;
@@ -7,10 +7,11 @@ import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
-import io.github.hectorvent.floci.services.ec2.Ec2Service;
-import io.github.hectorvent.floci.services.ec2.VpcAttachments;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
+import io.github.hectorvent.floci.services.elasticache.ElastiCacheService;
+import io.github.hectorvent.floci.services.elasticache.model.CacheCluster;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.quarkus.test.junit.QuarkusTest;
 import jakarta.inject.Inject;
@@ -31,14 +32,15 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
-/** A DB in its VPC admits only the security group its ingress rule names, at its endpoint name. */
+/** A DB and a cache in their VPC admit only the security group their ingress rules name, at their endpoint names. */
 @QuarkusTest
-class RdsVpcSecurityGroupDockerIntegrationTest {
+class VpcBackendSecurityGroupDockerIntegrationTest {
 
     private static final String REGION = "us-east-1";
 
     @Inject Ec2Service ec2;
     @Inject RdsService rds;
+    @Inject ElastiCacheService elastiCache;
     @Inject VpcAttachments vpc;
     @Inject EmbeddedDnsServer dns;
     @Inject ContainerLifecycleManager lifecycle;
@@ -46,7 +48,7 @@ class RdsVpcSecurityGroupDockerIntegrationTest {
     @Inject DockerClient docker;
 
     @Test
-    void dbSecurityGroupAdmitsOnlyTheGroupItsRuleNames() throws Exception {
+    void backendSecurityGroupAdmitsOnlyTheGroupItsRulesName() throws Exception {
         // Containers resolve the endpoint through Floci's DNS, which runs only when Floci is in Docker.
         Assumptions.assumeTrue(vpc.enabled() && dns.getServerIp().isPresent());
         try {
@@ -60,8 +62,9 @@ class RdsVpcSecurityGroupDockerIntegrationTest {
         String app = ec2.createSecurityGroup(REGION, "app-" + suffix, "app", vpcId).getGroupId();
         String other = ec2.createSecurityGroup(REGION, "other-" + suffix, "other", vpcId).getGroupId();
         String db = ec2.createSecurityGroup(REGION, "db-" + suffix, "db", vpcId).getGroupId();
-        ec2.authorizeSecurityGroupIngress(REGION, db, List.of(postgresFrom(app)));
+        ec2.authorizeSecurityGroupIngress(REGION, db, List.of(tcpFrom(app, 5432), tcpFrom(app, 6379)));
         rds.createDbSubnetGroup("db-" + suffix, "db", List.of(subnet), REGION);
+        elastiCache.createCacheSubnetGroup("cache-" + suffix, "cache", List.of(subnet), Map.of());
 
         List<VpcAttachments.Attachment> clients = new ArrayList<>();
         List<String> workers = new ArrayList<>();
@@ -71,6 +74,10 @@ class RdsVpcSecurityGroupDockerIntegrationTest {
                     "app", false, null, "db-" + suffix, null, false, REGION, null, null, null, false, null,
                     null, false, null, List.of(db));
             String name = cluster.getEndpoint().address();
+            CacheCluster cache = elastiCache.createCacheCluster(new ElastiCacheService.CreateCacheClusterRequest(
+                    "cache-" + suffix, "valkey", null, null, 1, null, null, null, null, "cache-" + suffix,
+                    null, null, null, null, List.of(db), null, null, null, REGION, Map.of()));
+            String cacheName = cache.getConfigurationEndpoint().address();
             for (String group : List.of(app, other)) {
                 VpcAttachments.Attachment client = vpc.attach("lambda", group, "000000000000", REGION, subnet,
                         List.of(group), "client", true, Optional.empty(), Map.of(), Map.of(), null);
@@ -87,6 +94,8 @@ class RdsVpcSecurityGroupDockerIntegrationTest {
             assertEquals(0, connect(workers.getFirst(), name, 5432, 5));
             assertEquals(0, connect(workers.getFirst(), name, cluster.getEndpoint().port(), 5));
             assertNotEquals(0, connect(workers.get(1), name, 5432, 1));
+            assertEquals(0, connect(workers.getFirst(), cacheName, 6379, 5));
+            assertNotEquals(0, connect(workers.get(1), cacheName, 6379, 1));
 
             // Postgres itself speaks TLS to clients that require it.
             try (Connection connection = DriverManager.getConnection("jdbc:postgresql://"
@@ -100,17 +109,18 @@ class RdsVpcSecurityGroupDockerIntegrationTest {
             workers.forEach(lifecycle::removeIfExists);
             clients.forEach(client -> vpc.detach(REGION, client.eni().getNetworkInterfaceId()));
             rds.deleteDbCluster(clusterId, REGION);
+            elastiCache.deleteCacheCluster("cache-" + suffix);
         }
     }
 
-    private static IpPermission postgresFrom(String groupId) {
+    private static IpPermission tcpFrom(String groupId, int port) {
         UserIdGroupPair source = new UserIdGroupPair();
         source.setGroupId(groupId);
         source.setUserId("000000000000");
         IpPermission permission = new IpPermission();
         permission.setIpProtocol("tcp");
-        permission.setFromPort(5432);
-        permission.setToPort(5432);
+        permission.setFromPort(port);
+        permission.setToPort(port);
         permission.getUserIdGroupPairs().add(source);
         return permission;
     }

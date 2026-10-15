@@ -99,7 +99,8 @@ public class ElastiCacheServerlessService implements Resettable {
                 String runtimeId = "serverless-" + UUID.randomUUID();
                 ElastiCacheService.CreateCacheClusterRequest backingRequest = new ElastiCacheService.CreateCacheClusterRequest(
                         runtimeId, engine, null, null, 1, null, AuthMode.NO_AUTH, null, null, null,
-                        0, null, null, null, null, null, null, false, region, Map.of());
+                        0, null, null, null, request.securityGroupIds(), null, null, false, region, Map.of(),
+                        request.subnetIds());
                 String account = resolver.getAccountId();
                 backing = "memcached".equals(engine)
                         ? memcached.createServerlessBacking(backingRequest, name, account)

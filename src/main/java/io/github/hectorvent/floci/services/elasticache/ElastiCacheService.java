@@ -6,6 +6,9 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
+import io.github.hectorvent.floci.core.common.dns.DnsRecordSource;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.resource.ExplorerResource;
 import io.github.hectorvent.floci.core.resource.ResourceProvider;
 import io.github.hectorvent.floci.core.resource.SupportedResourceType;
@@ -60,15 +63,17 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.UnaryOperator;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Core ElastiCache business logic — replication groups and users.
  * Creates Valkey containers and auth proxies on group creation.
  */
 @ApplicationScoped
-public class ElastiCacheService implements ResourceProvider {
+public class ElastiCacheService implements ResourceProvider, DnsRecordSource {
 
     private static final Logger LOG = Logger.getLogger(ElastiCacheService.class);
+    private static final String VPC_ENDPOINT_SUFFIX = ".cache." + EmbeddedDnsServer.DEFAULT_SUFFIX;
 
     private final AccountAwareStorageBackend<ReplicationGroup> groups;
     private final AccountAwareStorageBackend<CacheCluster> cacheClusters;
@@ -198,7 +203,20 @@ public class ElastiCacheService implements ResourceProvider {
             Integer port,
             ReplicationGroupSettings settings,
             Map<String, String> tags,
-            List<String> userGroupIds) {
+            List<String> userGroupIds,
+            List<String> securityGroupIds) {
+
+        public CreateReplicationGroupRequest(String replicationGroupId, String description, AuthMode authMode,
+                String authToken, String region, String engine, String engineVersion, String cacheNodeType,
+                String cacheParameterGroupName, String cacheSubnetGroupName, String clusterMode,
+                Integer numNodeGroups, Integer replicasPerNodeGroup, Integer numCacheClusters,
+                Boolean automaticFailoverEnabled, Boolean multiAzEnabled, Integer port,
+                ReplicationGroupSettings settings, Map<String, String> tags, List<String> userGroupIds) {
+            this(replicationGroupId, description, authMode, authToken, region, engine, engineVersion,
+                    cacheNodeType, cacheParameterGroupName, cacheSubnetGroupName, clusterMode, numNodeGroups,
+                    replicasPerNodeGroup, numCacheClusters, automaticFailoverEnabled, multiAzEnabled, port,
+                    settings, tags, userGroupIds, List.of());
+        }
     }
 
     public ReplicationGroup createReplicationGroup(String groupId, String description,
@@ -349,9 +367,12 @@ public class ElastiCacheService implements ResourceProvider {
             // derived from configuration and need no Docker, so the group is created and reaches
             // 'available' even when no daemon is reachable. Only connecting to the cache needs
             // the container.
+            ElastiCacheContainerManager.VpcPlacement vpc = vpcPlacement(request.cacheSubnetGroupName(),
+                    List.of(), request.securityGroupIds(), request.region(), proxyPort);
+            containerManager.placeInVpc(groupId, vpc);
             handle = containerManager.tryStart(groupId, image, request.region());
 
-            String endpointHost = resolveEndpointHost();
+            String endpointHost = vpc != null ? vpcEndpointHost(groupId, request.region()) : resolveEndpointHost();
             Endpoint endpoint = new Endpoint(endpointHost, proxyPort);
             ReplicationGroup group = new ReplicationGroup(
                     groupId, request.description(), ReplicationGroupStatus.AVAILABLE,
@@ -1265,7 +1286,20 @@ public class ElastiCacheService implements ResourceProvider {
             String ipDiscovery,
             Boolean atRestEncryptionEnabled,
             String region,
-            Map<String, String> tags) {
+            Map<String, String> tags,
+            List<String> subnetIds) {
+
+        public CreateCacheClusterRequest(String cacheClusterId, String engine, String engineVersion,
+                String cacheNodeType, Integer numCacheNodes, Integer port, AuthMode authMode, String authToken,
+                String cacheParameterGroupName, String cacheSubnetGroupName, Integer snapshotRetentionLimit,
+                String snapshotWindow, String preferredMaintenanceWindow, String preferredAvailabilityZone,
+                List<String> securityGroupIds, String networkType, String ipDiscovery,
+                Boolean atRestEncryptionEnabled, String region, Map<String, String> tags) {
+            this(cacheClusterId, engine, engineVersion, cacheNodeType, numCacheNodes, port, authMode, authToken,
+                    cacheParameterGroupName, cacheSubnetGroupName, snapshotRetentionLimit, snapshotWindow,
+                    preferredMaintenanceWindow, preferredAvailabilityZone, securityGroupIds, networkType,
+                    ipDiscovery, atRestEncryptionEnabled, region, tags, List.of());
+        }
     }
 
     public CacheCluster createCacheCluster(CreateCacheClusterRequest request) {
@@ -1415,13 +1449,18 @@ public class ElastiCacheService implements ResourceProvider {
             // As for a replication group, the record is metadata: it reaches 'available' even
             // when no Docker daemon is reachable, and only connecting to the cache needs the
             // container.
+            ElastiCacheContainerManager.VpcPlacement vpc = vpcPlacement(request.cacheSubnetGroupName(),
+                    request.subnetIds(), request.securityGroupIds(), request.region(), proxyPort);
+            containerManager.placeInVpc(clusterId, vpc);
             handle = containerManager.tryStart(clusterId, image, request.region());
 
             CacheCluster cluster = new CacheCluster(clusterId, CacheClusterStatus.AVAILABLE, engine,
                     request.engineVersion() != null && !request.engineVersion().isBlank()
                             ? request.engineVersion()
                             : defaultEngineVersion(engine),
-                    new Endpoint(resolveEndpointHost(), proxyPort), Instant.now());
+                    new Endpoint(vpc == null ? resolveEndpointHost()
+                            : vpcEndpointHost(cacheName != null ? cacheName + ".serverless" : clusterId,
+                                    request.region()), proxyPort), Instant.now());
             cluster.setNumCacheNodes(1);
             cluster.setCacheNodeType(request.cacheNodeType() != null && !request.cacheNodeType().isBlank()
                     ? request.cacheNodeType()
@@ -2319,6 +2358,57 @@ public class ElastiCacheService implements ResourceProvider {
 
     private String resolveEndpointHost() {
         return config.hostname().orElse("localhost");
+    }
+
+    /**
+     * Where a cache's backend joins its VPC when security groups are enforced: the first of its
+     * subnets, behind the given groups or the VPC's default one. Null leaves it on Floci's network.
+     */
+    private ElastiCacheContainerManager.VpcPlacement vpcPlacement(String subnetGroupName, List<String> subnetIds,
+                                                                  List<String> securityGroupIds, String region,
+                                                                  int proxyPort) {
+        if (!containerManager.vpcEnabled()) {
+            return null;
+        }
+        List<String> subnets = subnetIds != null && !subnetIds.isEmpty() ? subnetIds
+                : subnetGroupName == null || subnetGroupName.isBlank() ? List.of()
+                : subnetGroups.get(subnetGroupName).map(g -> List.copyOf(g.getSubnetAvailabilityZones().keySet()))
+                        .orElse(List.of());
+        return subnets.isEmpty() ? null : new ElastiCacheContainerManager.VpcPlacement(subnets.getFirst(),
+                securityGroupIds != null ? securityGroupIds : List.of(), proxyPort);
+    }
+
+    /**
+     * A VPC cache's endpoint is a name under Floci's own domain: public DNS sends it to 127.0.0.1,
+     * so the host reaches the proxy on the returned port, while Floci's DNS answers it inside
+     * containers with the backend's namespace address, where Valkey's own port works too.
+     */
+    private String vpcEndpointHost(String label, String region) {
+        return label + "." + regionResolver.getAccountId() + "." + region + VPC_ENDPOINT_SUFFIX;
+    }
+
+    @Override
+    public boolean answersFlociNames() {
+        return true;
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolveIpv4(String name) {
+        if (!name.toLowerCase(Locale.ROOT).endsWith(VPC_ENDPOINT_SUFFIX)) {
+            return Optional.empty();
+        }
+        Stream<String> hosts = Stream.concat(
+                groups.scanAllAccounts().stream().filter(group -> named(name, group.getConfigurationEndpoint()))
+                        .map(ReplicationGroup::getContainerHost),
+                cacheClusters.scanAllAccounts().stream().filter(cluster -> named(name, cluster.getConfigurationEndpoint()))
+                        .map(CacheCluster::getContainerHost));
+        // Only a backend Floci reaches by its Docker address has one to publish.
+        return hosts.filter(host -> host != null && host.matches("[0-9.]+")).findFirst()
+                .map(host -> DnsAnswer.records(List.of(host), 5));
+    }
+
+    private static boolean named(String name, Endpoint endpoint) {
+        return endpoint != null && name.equalsIgnoreCase(endpoint.address());
     }
 
     /**

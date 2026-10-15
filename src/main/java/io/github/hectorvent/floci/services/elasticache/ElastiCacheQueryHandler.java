@@ -143,7 +143,8 @@ public class ElastiCacheQueryHandler {
                             intParam(params, "Port"),
                             replicationGroupSettings(params),
                             parseTags(params),
-                            extractMemberList(params, "UserGroupIds.member.")));
+                            extractMemberList(params, "UserGroupIds.member."),
+                            parseSecurityGroupIds(params)));
             String result = replicationGroupXml(group);
             return Response.ok(AwsQueryResponse.envelope("CreateReplicationGroup", AwsNamespaces.EC, result)).build();
         } catch (AwsException e) {

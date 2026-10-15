@@ -10,7 +10,9 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.services.ec2.VpcAttachments;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -53,6 +55,13 @@ public class ElastiCacheContainerManager {
     private final RegionResolver regionResolver;
     private final Map<String, ElastiCacheContainerHandle> activeContainers = new ConcurrentHashMap<>();
     private volatile boolean dockerUnavailableLogged;
+    @Inject
+    Instance<VpcAttachments> vpcAttachments;
+    private final Map<String, VpcPlacement> vpcPlacements = new ConcurrentHashMap<>();
+    private final Map<String, Runnable> vpcDetachers = new ConcurrentHashMap<>();
+
+    /** A backend's subnet and security groups, and the proxy port its in-VPC clients may also use. */
+    public record VpcPlacement(String subnetId, List<String> securityGroupIds, int proxyPort) {}
 
     @Inject
     public ElastiCacheContainerManager(ContainerBuilder containerBuilder,
@@ -152,17 +161,28 @@ public class ElastiCacheContainerManager {
                 .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                         "elasticache", groupId, regionResolver.getAccountId(), region));
 
-        if (!containerDetector.isRunningInContainer()) {
+        VpcPlacement placement = vpcEnabled() ? vpcPlacements.get(groupId) : null;
+        VpcAttachments.Attachment attachment = placement != null
+                ? joinVpc(specBuilder, placement, groupId, containerName, region) : null;
+        if (attachment == null && !containerDetector.isRunningInContainer()) {
             specBuilder.withDynamicPort(BACKEND_PORT);
-        } else {
+        } else if (attachment == null) {
             specBuilder.withExposedPort(BACKEND_PORT);
         }
 
         ContainerSpec spec = specBuilder.build();
 
         // Create and start container
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
-        EndpointInfo endpoint = info.getEndpoint(BACKEND_PORT);
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.createAndStart(spec);
+        } catch (RuntimeException e) {
+            detachVpc(groupId);
+            throw e;
+        }
+        // A backend in its VPC listens in the namespace, which publishes its ports.
+        EndpointInfo endpoint = attachment != null
+                ? lifecycleManager.resolveEndpoint(attachment.helperId(), BACKEND_PORT) : info.getEndpoint(BACKEND_PORT);
 
         LOG.infov("ElastiCache backend for group {0}: {1}", groupId, endpoint);
 
@@ -240,6 +260,48 @@ public class ElastiCacheContainerManager {
         Closeable logStream = handle.getLogStream() != null ? handle.getLogStream()
                 : (existing != null ? existing.getLogStream() : null);
         lifecycleManager.stopAndRemove(handle.getContainerId(), logStream);
+        detachVpc(handle.getGroupId());
+    }
+
+    public boolean vpcEnabled() {
+        return vpcAttachments != null && vpcAttachments.isResolvable() && vpcAttachments.get().enabled();
+    }
+
+    /** Where the group's next backend runs: in its VPC, or on Floci's Docker network when null. */
+    public void placeInVpc(String groupId, VpcPlacement placement) {
+        if (placement == null) {
+            vpcPlacements.remove(groupId);
+        } else {
+            vpcPlacements.put(groupId, placement);
+        }
+    }
+
+    /**
+     * Runs the backend in a protected namespace on its subnet, behind its security groups, as
+     * ElastiCache puts a cache's ENI there. In-VPC clients reach Valkey on 6379 or on the proxy
+     * port the endpoint advertises.
+     */
+    private VpcAttachments.Attachment joinVpc(ContainerBuilder.Builder spec, VpcPlacement placement,
+                                              String groupId, String containerName, String region) {
+        VpcAttachments vpc = vpcAttachments.get();
+        VpcAttachments.Attachment attachment = vpc.attach("elasticache", containerName,
+                regionResolver.getAccountId(), region, placement.subnetId(), placement.securityGroupIds(),
+                "ElastiCache " + groupId, true, config.services().elasticache().dockerNetwork(),
+                containerDetector.isRunningInContainer() ? Map.of() : Map.of(BACKEND_PORT, 0), Map.of(), null);
+        vpcDetachers.put(groupId, () -> vpc.detach(region, attachment.eni().getNetworkInterfaceId()));
+        if (placement.proxyPort() != BACKEND_PORT) {
+            vpc.redirect(attachment, placement.proxyPort(), BACKEND_PORT);
+        }
+        spec.withNetworkMode(attachment.networkMode())
+                .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
+        return attachment;
+    }
+
+    private void detachVpc(String groupId) {
+        Runnable detach = vpcDetachers.remove(groupId);
+        if (detach != null) {
+            detach.run();
+        }
     }
 
     /**
@@ -258,6 +320,7 @@ public class ElastiCacheContainerManager {
             return;
         }
         lifecycleManager.removeIfExists(containerName(groupId));
+        detachVpc(groupId);
     }
 
     private String containerName(String groupId) {
