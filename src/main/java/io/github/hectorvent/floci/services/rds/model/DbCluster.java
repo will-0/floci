@@ -31,6 +31,7 @@ public class DbCluster {
     private String globalClusterIdentifier;
     private String parameterGroupName;
     private String dbSubnetGroupName;
+    private List<String> vpcSecurityGroupIds = new ArrayList<>();
     private String vpcId;
     private String availabilityZone;
     private boolean multiAz;
@@ -141,6 +142,10 @@ public class DbCluster {
 
     public String getDbSubnetGroupName() { return dbSubnetGroupName; }
     public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
+    public List<String> getVpcSecurityGroupIds() { return vpcSecurityGroupIds; }
+    public void setVpcSecurityGroupIds(List<String> ids) {
+        this.vpcSecurityGroupIds = ids != null ? new ArrayList<>(ids) : new ArrayList<>();
+    }
 
     public String getVpcId() { return vpcId; }
     public void setVpcId(String vpcId) { this.vpcId = vpcId; }

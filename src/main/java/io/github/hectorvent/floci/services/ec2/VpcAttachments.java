@@ -75,6 +75,11 @@ public class VpcAttachments {
         }
     }
 
+    /** Lets in-VPC clients reach a workload's port on another one too, such as a DB's proxy port. */
+    public void redirect(Attachment attachment, int fromPort, int toPort) {
+        firewallManager.redirect(attachment.helperId(), fromPort, toPort);
+    }
+
     /** Removes the namespace and the ENI. Safe to repeat. */
     public void detach(String region, String eniId) {
         firewallManager.unregister(eniId);

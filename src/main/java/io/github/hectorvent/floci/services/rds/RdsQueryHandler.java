@@ -1203,18 +1203,12 @@ public class RdsQueryHandler {
                             manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
                             requestedPort);
             } else {
-                cluster = requestedPort == null
-                    ? service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted)
-                    : service.createDbCluster(id, engine, engineVersion, masterUsername,
-                            masterPassword, databaseName, iamEnabled, paramGroupName,
-                            dbSubnetGroupName, availabilityZone, multiAz, region,
-                            serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
-                            manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
-                            requestedPort);
+                cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
+                        masterPassword, databaseName, iamEnabled, paramGroupName,
+                        dbSubnetGroupName, availabilityZone, multiAz, region,
+                        serverlessV2Min, serverlessV2Max, serverlessV2SecondsUntilAutoPause,
+                        manageMasterUserPassword, masterUserSecretKmsKeyId, engineMode, storageEncrypted,
+                        requestedPort, memberList(params, "VpcSecurityGroupIds"));
             }
             if (!associatedRoles.isEmpty()) {
                 try {
@@ -2728,7 +2722,7 @@ public class RdsQueryHandler {
            .elem("StorageEncrypted", i.isStorageEncrypted())
            .elem("CopyTagsToSnapshot", i.isCopyTagsToSnapshot())
            .elem("DeletionProtection", i.isDeletionProtection())
-           .raw(vpcSecurityGroupsXml(i))
+           .raw(vpcSecurityGroupsXml(i.getVpcSecurityGroupIds()))
            .raw(dbParameterGroupsXml(i))
            .raw(optionGroupMembershipsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
@@ -2809,10 +2803,8 @@ public class RdsQueryHandler {
         return xml.build();
     }
 
-    private String vpcSecurityGroupsXml(DbInstance i) {
-        List<String> groupIds = i.getVpcSecurityGroupIds().isEmpty()
-                ? List.of("sg-00000000")
-                : i.getVpcSecurityGroupIds();
+    private String vpcSecurityGroupsXml(List<String> ids) {
+        List<String> groupIds = ids.isEmpty() ? List.of("sg-00000000") : ids;
         XmlBuilder xml = new XmlBuilder().start("VpcSecurityGroups");
         for (String groupId : groupIds) {
             xml.start("VpcSecurityGroupMembership")
@@ -2937,12 +2929,7 @@ public class RdsQueryHandler {
            .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
-           .start("VpcSecurityGroups")
-             .start("VpcSecurityGroupMembership")
-               .elem("VpcSecurityGroupId", "sg-00000000")
-               .elem("Status", "active")
-             .end("VpcSecurityGroupMembership")
-           .end("VpcSecurityGroups")
+           .raw(vpcSecurityGroupsXml(c.getVpcSecurityGroupIds()))
            .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
            .elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn());

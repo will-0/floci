@@ -206,6 +206,25 @@ class EmbeddedDnsServerTest {
                 withSource.resolveARecord("bucket.localhost.floci.io", "172.31.0.2"));
     }
 
+    @Test
+    void resolveARecord_letsAFlociServiceAnswerANameUnderItsDomain() {
+        DnsRecordSource service = new DnsRecordSource() {
+            @Override
+            public Optional<DnsAnswer> resolveIpv4(String name) {
+                return source("db.rds.localhost.floci.io", List.of("172.31.0.6")).resolveIpv4(name);
+            }
+
+            @Override
+            public boolean answersFlociNames() {
+                return true;
+            }
+        };
+        EmbeddedDnsServer withSource = new EmbeddedDnsServer(List.of("localhost.floci.io"), List.of(service));
+
+        assertEquals(List.of("172.31.0.6"), withSource.resolveARecord("db.rds.localhost.floci.io", "172.31.0.2"));
+        assertEquals(List.of("172.31.0.2"), withSource.resolveARecord("other.rds.localhost.floci.io", "172.31.0.2"));
+    }
+
     private static DnsRecordSource source(String owned, List<String> addresses) {
         return source(owned, addresses, DnsAnswer.DEFAULT_TTL_SECONDS);
     }

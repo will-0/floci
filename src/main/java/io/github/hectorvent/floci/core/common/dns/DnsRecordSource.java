@@ -19,6 +19,15 @@ public interface DnsRecordSource {
      */
     Optional<DnsAnswer> resolveIpv4(String name);
 
+    /**
+     * Whether this source publishes names under Floci's own domain, which it then answers ahead
+     * of the wildcard, such as a VPC database's endpoint. Only Floci's own services do: a zone a
+     * client creates never takes over a Floci name.
+     */
+    default boolean answersFlociNames() {
+        return false;
+    }
+
     /** A source that only implements IPv4 still preserves name ownership for other query types. */
     default Optional<DnsAnswer> resolve(String name, int type) {
         return resolveIpv4(name).map(answer -> type == 1 ? answer

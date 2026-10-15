@@ -308,6 +308,10 @@ public class EmbeddedDnsServer {
 
     private Optional<DnsAnswer> resolveEmulatorName(String name, String myIp, int type) {
         if (matchesSuffix(name)) {
+            Optional<DnsAnswer> owned = resolveFromRecordSources(name, type, true);
+            if (owned.isPresent()) {
+                return owned;
+            }
             return Optional.of(type == 1 ? DnsAnswer.records(List.of(myIp), DnsAnswer.DEFAULT_TTL_SECONDS)
                     : DnsAnswer.noData());
         }
@@ -384,10 +388,17 @@ public class EmbeddedDnsServer {
      * through to the upstream resolvers, which is what happened before any source existed.
      */
     private Optional<DnsAnswer> resolveFromRecordSources(String name, int type) {
+        return resolveFromRecordSources(name, type, false);
+    }
+
+    private Optional<DnsAnswer> resolveFromRecordSources(String name, int type, boolean flociNames) {
         if (recordSources == null) {
             return Optional.empty();
         }
         for (DnsRecordSource source : recordSources) {
+            if (flociNames && !source.answersFlociNames()) {
+                continue;
+            }
             try {
                 Optional<DnsAnswer> answer = source.resolve(name, type);
                 if (answer != null && answer.isPresent()) {

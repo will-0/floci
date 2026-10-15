@@ -142,6 +142,8 @@ public class SecurityGroupFirewallManager {
         ContainerSpec spec = builder.build();
         String helperId = null;
         try {
+            // A helper left by an earlier run holds the name; nothing of this run uses it.
+            lifecycleManager.removeIfExists(name);
             helperId = lifecycleManager.createAndStart(spec).containerId();
             String ip = dockerClient.inspectContainerCmd(helperId).exec().getNetworkSettings()
                     .getNetworks().values().stream().map(n -> n.getIpAddress())
@@ -186,6 +188,16 @@ public class SecurityGroupFirewallManager {
             quarantine(helperId);
             throw e;
         }
+    }
+
+    /**
+     * Redirects connections to one port of the namespace to another before the security groups
+     * see them, so they are judged on the port the workload listens on.
+     */
+    public synchronized void redirect(String helperId, int fromPort, int toPort) {
+        apply(helperId, "add table ip floci_nat\n"
+                + "add chain ip floci_nat prerouting { type nat hook prerouting priority -100; }\n"
+                + "add rule ip floci_nat prerouting tcp dport " + fromPort + " redirect to :" + toPort + "\n");
     }
 
     public void removeHelper(String helperId) {

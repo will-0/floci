@@ -708,7 +708,7 @@ class RdsQueryHandlerTest {
         when(service.createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false)))
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), isNull(), any()))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -728,7 +728,7 @@ class RdsQueryHandlerTest {
         verify(service).createDbCluster(eq("mycluster"), eq("aurora-postgresql"), any(),
                 eq("omni_admin"), isNull(), eq("omni"), eq(false), isNull(),
                 isNull(), isNull(), eq(false), any(),
-                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false));
+                isNull(), isNull(), isNull(), eq(true), eq("kms-key-1"), isNull(), eq(false), isNull(), any());
     }
 
     @Test
@@ -736,7 +736,7 @@ class RdsQueryHandlerTest {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), eq(false), isNull(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), any()))
                 .thenReturn(cluster);
 
         MultivaluedMap<String, String> p = params();
@@ -754,7 +754,7 @@ class RdsQueryHandlerTest {
         DbCluster cluster = makeCluster("mycluster");
         when(service.createDbCluster(any(), any(), any(), any(), any(), any(), anyBoolean(), any(),
                 any(), any(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), any(),
-                any(), anyBoolean()))
+                any(), anyBoolean(), any(), any()))
                 .thenReturn(cluster);
         // Another request associated the role between the create and the roles being added.
         when(service.addRolesToNewDbCluster(any(), eq("mycluster"), anyList()))

@@ -13,6 +13,9 @@ import io.github.hectorvent.floci.core.common.BackupWindows;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.RequestScopes;
 import io.github.hectorvent.floci.core.common.Resettable;
+import io.github.hectorvent.floci.core.common.dns.DnsAnswer;
+import io.github.hectorvent.floci.core.common.dns.DnsRecordSource;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
@@ -97,7 +100,7 @@ import java.util.regex.Pattern;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService implements Resettable, ResourceProvider {
+public class RdsService implements Resettable, ResourceProvider, DnsRecordSource {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -110,6 +113,7 @@ public class RdsService implements Resettable, ResourceProvider {
     private static final Duration EVENT_RETENTION = Duration.ofDays(14);
     /** Value AWS reports as the OwningService of a secret RDS manages. */
     private static final String MANAGED_SECRET_OWNING_SERVICE = "rds";
+    private static final String VPC_ENDPOINT_SUFFIX = ".rds." + EmbeddedDnsServer.DEFAULT_SUFFIX;
     private static final List<ManagedClusterParameterGroup> MANAGED_CLUSTER_PARAMETER_GROUPS = List.of(
             managedDefault("aurora-mysql5.7"),
             managedDefault("aurora-mysql8.0"),
@@ -760,6 +764,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String instanceStorageResourceId = dbiResourceId;
         PlacementResolution placement;
         DbCluster publicationCluster = null;
+        boolean inVpc;
 
         String engineIdentifier = engineParam != null && !engineParam.isBlank()
                 ? engineParam.toLowerCase() : null;
@@ -792,8 +797,13 @@ public class RdsService implements Resettable, ResourceProvider {
             }
             instanceStorageResourceId = resolvedClusterStorageResourceId(cluster);
             placement = PlacementResolution.fromCluster(cluster);
+            inVpc = !mock && isVpcEndpoint(cluster.getEndpoint());
         } else {
             placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
+            RdsContainerManager.VpcPlacement vpc = mock ? null
+                    : vpcPlacement(dbSubnetGroupName, vpcSecurityGroupIds, effectiveRegion, proxyPort);
+            containerManager.placeInVpc(dbInstanceArn, vpc);
+            inVpc = vpc != null;
             if (!mock) {
                 // Standalone instance, so it starts its own container. The record itself is metadata:
                 // identifier, ARN, endpoint and tags come from configuration, so the instance is
@@ -820,7 +830,8 @@ public class RdsService implements Resettable, ResourceProvider {
             }
         }
 
-        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
+        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort)
+                : inVpc ? vpcEndpoint(id, "", effectiveRegion, proxyPort) : proxyEndpoint(proxyPort);
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.CREATING,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
@@ -2022,7 +2033,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 parameterGroupName, dbSubnetGroupName, availabilityZone, false, effectiveRegion,
                 null, null, null, false, null,
                 engineMode != null && !engineMode.isBlank() ? engineMode : snapshot.getEngineMode(),
-                snapshot.isStorageEncrypted(), port);
+                snapshot.isStorageEncrypted(), port, List.of());
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -2101,7 +2112,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 parameterGroupName, dbSubnetGroupName, null, false, effectiveRegion,
                 null, null, null, false, null,
                 !isBlank(engineMode) ? engineMode : source.getEngineMode(),
-                source.isStorageEncrypted(), port);
+                source.isStorageEncrypted(), port, source.getVpcSecurityGroupIds());
         if (tags != null && !tags.isEmpty()) {
             cluster.getTags().putAll(tags);
             putClusterForScope(accountId, effectiveRegion, clusterId, cluster);
@@ -3412,6 +3423,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String dockerVolumeName = resolvedInstanceDockerVolumeName(instance);
         RdsContainerHandle handle;
         try {
+            containerManager.placeInVpc(instance.getDbInstanceArn(), vpcPlacement(instance));
             handle = containerManager.tryStart(
                     instance.getDbInstanceArn(), id, storageResourceId,
                     dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
@@ -3594,6 +3606,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String dockerVolumeName = resolvedClusterDockerVolumeName(cluster);
         RdsContainerHandle handle;
         try {
+            containerManager.placeInVpc(cluster.getDbClusterArn(), vpcPlacement(cluster));
             handle = containerManager.tryStart(
                     cluster.getDbClusterArn(), id, storageResourceId, dockerVolumeName,
                     cluster.getEngine(), image, cluster.getMasterUsername(), cluster.getMasterPassword(),
@@ -3659,6 +3672,7 @@ public class RdsService implements Resettable, ResourceProvider {
                 String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
                 String storageResourceId = resolvedInstanceStorageResourceId(instance);
                 String dockerVolumeName = resolvedInstanceDockerVolumeName(instance);
+                containerManager.placeInVpc(instance.getDbInstanceArn(), vpcPlacement(instance));
                 RdsContainerHandle handle = containerManager.tryStart(
                         instance.getDbInstanceArn(), id, storageResourceId,
                         dockerVolumeName, instance.getEngine(), image, instance.getMasterUsername(),
@@ -3781,6 +3795,7 @@ public class RdsService implements Resettable, ResourceProvider {
             backendPort = cluster.getContainerPort();
         } else {
             String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
+            containerManager.placeInVpc(instance.getDbInstanceArn(), vpcPlacement(instance));
             started = containerManager.tryStart(
                     instance.getDbInstanceArn(), id, resolvedInstanceStorageResourceId(instance),
                     resolvedInstanceDockerVolumeName(instance), instance.getEngine(), image,
@@ -3883,6 +3898,7 @@ public class RdsService implements Resettable, ResourceProvider {
         String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
         String storageResourceId = resolvedClusterStorageResourceId(cluster);
         String dockerVolumeName = resolvedClusterDockerVolumeName(cluster);
+        containerManager.placeInVpc(cluster.getDbClusterArn(), vpcPlacement(cluster));
         RdsContainerHandle started = containerManager.tryStart(
                 cluster.getDbClusterArn(), id, storageResourceId, dockerVolumeName,
                 cluster.getEngine(), image, cluster.getMasterUsername(),
@@ -4223,11 +4239,28 @@ public class RdsService implements Resettable, ResourceProvider {
                                      Integer serverlessV2SecondsUntilAutoPause,
                                      boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
                                      String engineMode, boolean storageEncrypted, Integer requestedPort) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
+                multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
+                serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
+                engineMode, storageEncrypted, requestedPort, List.of());
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz, String region,
+                                     Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
+                                     Integer serverlessV2SecondsUntilAutoPause,
+                                     boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
+                                     String engineMode, boolean storageEncrypted, Integer requestedPort,
+                                     List<String> vpcSecurityGroupIds) {
         return createDbClusterWithPort(id, engineParam, engineVersion, masterUsername, masterPassword,
                 databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
                 multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
                 serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
-                engineMode, storageEncrypted, requestedPort);
+                engineMode, storageEncrypted, requestedPort, vpcSecurityGroupIds);
     }
 
     private DbCluster createDbClusterWithPort(String id, String engineParam, String engineVersion,
@@ -4238,7 +4271,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                               Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                               Integer serverlessV2SecondsUntilAutoPause,
                                               boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                              String engineMode, boolean storageEncrypted, Integer requestedPort) {
+                                              String engineMode, boolean storageEncrypted, Integer requestedPort,
+                                              List<String> vpcSecurityGroupIds) {
         String provisioningKey = "cluster:" + currentAccountId() + ":"
                 + dbResourceKey(effectiveRegion(region), id);
         if (!provisioningIds.add(provisioningKey)) {
@@ -4250,7 +4284,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     databaseName, iamEnabled, paramGroupName, dbSubnetGroupName, availabilityZone,
                     multiAz, region, serverlessV2MinCapacity, serverlessV2MaxCapacity,
                     serverlessV2SecondsUntilAutoPause, manageMasterUserPassword, masterUserSecretKmsKeyId,
-                    engineMode, storageEncrypted, requestedPort);
+                    engineMode, storageEncrypted, requestedPort, vpcSecurityGroupIds);
         } finally {
             provisioningIds.remove(provisioningKey);
         }
@@ -4264,7 +4298,8 @@ public class RdsService implements Resettable, ResourceProvider {
                                         Double serverlessV2MinCapacity, Double serverlessV2MaxCapacity,
                                         Integer serverlessV2SecondsUntilAutoPause,
                                         boolean manageMasterUserPassword, String masterUserSecretKmsKeyId,
-                                        String engineMode, boolean storageEncrypted, Integer requestedPort) {
+                                        String engineMode, boolean storageEncrypted, Integer requestedPort,
+                                        List<String> vpcSecurityGroupIds) {
         String effectiveRegion = effectiveRegion(region);
         String clusterResourceId = "cluster-" + java.util.UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase();
@@ -4293,10 +4328,15 @@ public class RdsService implements Resettable, ResourceProvider {
         if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
             masterPassword = generatedMasterPassword();
         }
-        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort) : proxyEndpoint(proxyPort);
+        RdsContainerManager.VpcPlacement vpc = mock ? null
+                : vpcPlacement(dbSubnetGroupName, vpcSecurityGroupIds, effectiveRegion, proxyPort);
+        DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort)
+                : vpc != null ? vpcEndpoint(id, "cluster-", effectiveRegion, proxyPort) : proxyEndpoint(proxyPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
-                databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
+                databaseName, DbInstanceStatus.AVAILABLE, endpoint,
+                vpc != null ? vpcEndpoint(id, "cluster-ro-", effectiveRegion, proxyPort) : endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
+        cluster.setVpcSecurityGroupIds(vpcSecurityGroupIds);
         cluster.setEngineIdentifier(effectiveEngineName(engineParam).toLowerCase(Locale.ROOT));
         cluster.setEngineMode(engineMode != null && !engineMode.isBlank() ? engineMode : "provisioned");
         cluster.setStorageEncrypted(storageEncrypted);
@@ -4306,6 +4346,7 @@ public class RdsService implements Resettable, ResourceProvider {
             String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
             String clusterDockerVolumeName = newVolumeName(
                     clusterVolumeId, clusterResourceId);
+            containerManager.placeInVpc(clusterArn, vpc);
             RdsContainerHandle handle = containerManager.tryStart(
                     clusterArn, id, clusterResourceId, clusterDockerVolumeName,
                     engine, image,
@@ -7302,6 +7343,84 @@ public class RdsService implements Resettable, ResourceProvider {
         return dockerHostResolver != null ? dockerHostResolver.resolve() : "localhost";
     }
 
+    /**
+     * Where a DB's backend joins its VPC when security groups are enforced: the first subnet of
+     * an explicit DB subnet group, behind the given groups or the VPC's default one. Null leaves
+     * the backend on Floci's Docker network, as it is without enforcement.
+     */
+    private RdsContainerManager.VpcPlacement vpcPlacement(String subnetGroupName, List<String> securityGroupIds,
+                                                          String region, int proxyPort) {
+        if (!containerManager.vpcEnabled() || !hasText(subnetGroupName) || "default".equalsIgnoreCase(subnetGroupName)) {
+            return null;
+        }
+        List<String> subnets = getDbSubnetGroup(subnetGroupName, region).getSubnetIds();
+        return subnets.isEmpty() ? null : new RdsContainerManager.VpcPlacement(subnets.getFirst(),
+                securityGroupIds != null ? securityGroupIds : List.of(), proxyPort);
+    }
+
+    private RdsContainerManager.VpcPlacement vpcPlacement(DbCluster cluster) {
+        return isVpcEndpoint(cluster.getEndpoint()) ? vpcPlacement(cluster.getDbSubnetGroupName(),
+                cluster.getVpcSecurityGroupIds(), regionFromArn(cluster.getDbClusterArn()), cluster.getProxyPort()) : null;
+    }
+
+    private RdsContainerManager.VpcPlacement vpcPlacement(DbInstance instance) {
+        return isVpcEndpoint(instance.getEndpoint()) ? vpcPlacement(instance.getDbSubnetGroupName(),
+                instance.getVpcSecurityGroupIds(), regionFromArn(instance.getDbInstanceArn()), instance.getProxyPort()) : null;
+    }
+
+    /**
+     * A VPC DB's endpoint is a name under Floci's own domain: public DNS sends it to 127.0.0.1, so
+     * the host reaches the auth proxy on the returned port, while Floci's DNS answers it inside
+     * containers with the backend's namespace address, where the engine's own port works too.
+     */
+    private DbEndpoint vpcEndpoint(String id, String kind, String region, int proxyPort) {
+        return new DbEndpoint(id + "." + kind + currentAccountId() + "." + region + VPC_ENDPOINT_SUFFIX,
+                proxyEndpoint(proxyPort).port());
+    }
+
+    private DbEndpoint restoredEndpoint(DbEndpoint previous, int proxyPort) {
+        return isVpcEndpoint(previous) ? new DbEndpoint(previous.address(), proxyEndpoint(proxyPort).port())
+                : proxyEndpoint(proxyPort);
+    }
+
+    private static boolean isVpcEndpoint(DbEndpoint endpoint) {
+        return endpoint != null && endpoint.address() != null
+                && endpoint.address().toLowerCase(Locale.ROOT).endsWith(VPC_ENDPOINT_SUFFIX);
+    }
+
+    @Override
+    public boolean answersFlociNames() {
+        return true;
+    }
+
+    @Override
+    public Optional<DnsAnswer> resolveIpv4(String name) {
+        if (!name.toLowerCase(Locale.ROOT).endsWith(VPC_ENDPOINT_SUFFIX)) {
+            return Optional.empty();
+        }
+        for (DbCluster cluster : allClusters()) {
+            if (named(name, cluster.getEndpoint()) || named(name, cluster.getReaderEndpoint())) {
+                return backendRecord(cluster.getContainerHost());
+            }
+        }
+        for (DbInstance instance : allInstances()) {
+            if (named(name, instance.getEndpoint())) {
+                return backendRecord(instance.getContainerHost());
+            }
+        }
+        return Optional.empty();
+    }
+
+    private static boolean named(String name, DbEndpoint endpoint) {
+        return endpoint != null && name.equalsIgnoreCase(endpoint.address());
+    }
+
+    /** Only a backend Floci reaches by its Docker address has one to publish. */
+    private static Optional<DnsAnswer> backendRecord(String host) {
+        return host != null && host.matches("[0-9.]+")
+                ? Optional.of(DnsAnswer.records(List.of(host), 5)) : Optional.empty();
+    }
+
     private void validateDbProxyCreate(String name, String engineFamily, String roleArn,
                                        List<String> subnetIds, List<DbProxyAuth> auth,
                                        String defaultAuthScheme, int idleClientTimeout) {
@@ -7969,9 +8088,8 @@ public class RdsService implements Resettable, ResourceProvider {
                         persistedPortOwners, cluster.getDbClusterArn(), cluster.getProxyPort());
                 if (port != cluster.getProxyPort()) {
                     cluster.setProxyPort(port);
-                    DbEndpoint endpoint = proxyEndpoint(port);
-                    cluster.setEndpoint(endpoint);
-                    cluster.setReaderEndpoint(endpoint);
+                    cluster.setEndpoint(restoredEndpoint(cluster.getEndpoint(), port));
+                    cluster.setReaderEndpoint(restoredEndpoint(cluster.getReaderEndpoint(), port));
                     putClusterForScope(accountIdFromArn(cluster.getDbClusterArn()),
                             regionFromArn(cluster.getDbClusterArn()), cluster.getDbClusterIdentifier(), cluster);
                 }
@@ -8000,10 +8118,10 @@ public class RdsService implements Resettable, ResourceProvider {
                             cluster.getDbClusterIdentifier(), cluster);
                     continue;
                 }
-                DbEndpoint endpoint = proxyEndpoint(proxyPort);
-                cluster.setEndpoint(endpoint);
-                cluster.setReaderEndpoint(endpoint);
+                cluster.setEndpoint(restoredEndpoint(cluster.getEndpoint(), proxyPort));
+                cluster.setReaderEndpoint(restoredEndpoint(cluster.getReaderEndpoint(), proxyPort));
                 String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
+                containerManager.placeInVpc(cluster.getDbClusterArn(), vpcPlacement(cluster));
                 restoredHandle = containerManager.tryStart(
                         cluster.getDbClusterArn(), cluster.getDbClusterIdentifier(),
                         storageResourceId, dockerVolumeName, cluster.getEngine(), image,
@@ -8083,7 +8201,7 @@ public class RdsService implements Resettable, ResourceProvider {
                         persistedPortOwners, instance.getDbInstanceArn(), instance.getProxyPort());
                 if (port != instance.getProxyPort()) {
                     instance.setProxyPort(port);
-                    instance.setEndpoint(proxyEndpoint(port));
+                    instance.setEndpoint(restoredEndpoint(instance.getEndpoint(), port));
                     putInstanceForScope(accountIdFromArn(instance.getDbInstanceArn()),
                             regionFromArn(instance.getDbInstanceArn()), instance.getDbInstanceIdentifier(), instance);
                 }
@@ -8120,7 +8238,7 @@ public class RdsService implements Resettable, ResourceProvider {
                             instance.getDbInstanceIdentifier(), instance);
                     continue;
                 }
-                instance.setEndpoint(proxyEndpoint(proxyPort));
+                instance.setEndpoint(restoredEndpoint(instance.getEndpoint(), proxyPort));
                 String backendHost;
                 int backendPort;
                 if (clusterId != null && !clusterId.isBlank()) {
@@ -8145,6 +8263,7 @@ public class RdsService implements Resettable, ResourceProvider {
                     instance.setContainerPort(cluster.getContainerPort());
                 } else {
                     String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
+                    containerManager.placeInVpc(instance.getDbInstanceArn(), vpcPlacement(instance));
                     restoredHandle = containerManager.tryStart(
                             instance.getDbInstanceArn(), instance.getDbInstanceIdentifier(),
                             instance.getContainerStorageResourceId(),

@@ -16,9 +16,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLiveness;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.services.acm.CertificateGenerator;
+import io.github.hectorvent.floci.services.acm.model.KeyAlgorithm;
+import io.github.hectorvent.floci.services.ec2.VpcAttachments;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
@@ -71,6 +75,15 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
     private final Set<String> claimedRuntimes = ConcurrentHashMap.newKeySet();
     private final Set<String> cleanupPending = ConcurrentHashMap.newKeySet();
     private volatile boolean dockerUnavailableLogged;
+    @Inject
+    Instance<VpcAttachments> vpcAttachments;
+    @Inject
+    Instance<CertificateGenerator> certificateGenerator;
+    private final Map<String, VpcPlacement> vpcPlacements = new ConcurrentHashMap<>();
+    private final Map<String, Runnable> vpcDetachers = new ConcurrentHashMap<>();
+
+    /** A backend's subnet and security groups, and the proxy port its in-VPC clients may also use. */
+    public record VpcPlacement(String subnetId, List<String> securityGroupIds, int proxyPort) {}
     // Auto-pause state of every running container, by runtime id. The timer thread only keeps
     // time: each task it fires runs on a virtual thread of its own, since a pause first asks the
     // RDS service whether the cluster may pause. Events reach the listener one at a time, in order.
@@ -278,7 +291,12 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
                     .withLabels(ContainerStorageHelper.resourceIdentityLabels(
                             "rds", instanceId, runtimeIdentity.accountId(), runtimeIdentity.region()));
 
-            if (!containerDetector.isRunningInContainer()) {
+            VpcPlacement placement = vpcEnabled() ? vpcPlacements.get(effectiveRuntimeId) : null;
+            String helperId = null;
+            if (placement != null) {
+                helperId = joinVpc(specBuilder, placement, effectiveRuntimeId, containerName, engine,
+                        enginePort, runtimeIdentity);
+            } else if (!containerDetector.isRunningInContainer()) {
                 specBuilder.withDynamicPort(enginePort);
             } else {
                 specBuilder.withExposedPort(enginePort);
@@ -305,8 +323,13 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             if (needsMasterGrant(engine, masterUsername)) {
                 installMasterGrantInitScript(createdContainerId, masterUsername);
             }
+            if (helperId != null && engine == DatabaseEngine.POSTGRES) {
+                installTlsCertificate(createdContainerId);
+            }
             ContainerInfo info = lifecycleManager.startCreated(createdContainerId, spec);
-            EndpointInfo endpoint = info.getEndpoint(enginePort);
+            // A backend in its VPC listens in the namespace, which publishes its ports.
+            EndpointInfo endpoint = helperId != null
+                    ? lifecycleManager.resolveEndpoint(helperId, enginePort) : info.getEndpoint(enginePort);
 
             LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
             initializeEngine(containerName, info.containerId(), engine, masterUsername, masterPassword, dbName);
@@ -361,6 +384,7 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
                 }
             }
             if (cleaned) {
+                detachVpc(effectiveRuntimeId);
                 releaseOwnership(storageKey, containerKey, effectiveRuntimeId);
             }
             throw e;
@@ -412,9 +436,77 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
             throw e;
         }
         activeContainers.remove(effectiveHandle.getRuntimeId(), effectiveHandle);
+        detachVpc(effectiveHandle.getRuntimeId());
         releaseOwnership(
                 effectiveHandle.getStorageKey(), effectiveHandle.getContainerKey(),
                 effectiveHandle.getRuntimeId());
+    }
+
+    public boolean vpcEnabled() {
+        return vpcAttachments != null && vpcAttachments.isResolvable() && vpcAttachments.get().enabled();
+    }
+
+    /** Where the runtime's next backend runs: in its VPC, or on Floci's Docker network when null. */
+    public void placeInVpc(String runtimeId, VpcPlacement placement) {
+        if (placement == null) {
+            vpcPlacements.remove(runtimeId);
+        } else {
+            vpcPlacements.put(runtimeId, placement);
+        }
+    }
+
+    /**
+     * Runs the backend in a protected namespace on its subnet, behind its security groups, the
+     * way RDS puts a DB's ENI there. Floci's proxy still reaches it, and in-VPC clients reach it
+     * on the engine's port or the proxy port the endpoint advertises. Returns the namespace.
+     */
+    private String joinVpc(ContainerBuilder.Builder spec, VpcPlacement placement, String runtimeId,
+                           String containerName, DatabaseEngine engine, int enginePort,
+                           RuntimeIdentity identity) {
+        VpcAttachments vpc = vpcAttachments.get();
+        VpcAttachments.Attachment attachment = vpc.attach("rds", containerName, identity.accountId(),
+                identity.region(), placement.subnetId(), placement.securityGroupIds(), "RDSNetworkInterface",
+                true, config.services().rds().dockerNetwork(),
+                containerDetector.isRunningInContainer() ? Map.of() : Map.of(enginePort, 0), Map.of(), null);
+        vpcDetachers.put(runtimeId, () -> vpc.detach(identity.region(), attachment.eni().getNetworkInterfaceId()));
+        if (placement.proxyPort() != enginePort) {
+            vpc.redirect(attachment, placement.proxyPort(), enginePort);
+        }
+        spec.withNetworkMode(attachment.networkMode())
+                .withLabels(Map.of(ContainerStorageHelper.SECURITY_GROUP_WORKLOAD_LABEL, "true"));
+        if (engine == DatabaseEngine.POSTGRES) {
+            // Clients in the VPC reach Postgres itself, not the TLS-terminating proxy.
+            spec.withEntrypoint(List.of("sh", "-c",
+                            "chown postgres /floci-tls/server.key && exec docker-entrypoint.sh \"$@\"", "sh"))
+                    .withCmd(List.of("postgres", "-c", "ssl=on", "-c", "ssl_cert_file=/floci-tls/server.crt",
+                            "-c", "ssl_key_file=/floci-tls/server.key"));
+        }
+        return attachment.helperId();
+    }
+
+    private void detachVpc(String runtimeId) {
+        Runnable detach = vpcDetachers.remove(runtimeId);
+        if (detach != null) {
+            detach.run();
+        }
+    }
+
+    /** A self-signed certificate: clients that require TLS without verifying it, as most do, connect. */
+    private void installTlsCertificate(String containerId) {
+        CertificateGenerator.GeneratedCertificate certificate = certificateGenerator.get()
+                .generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+        try (ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
+                addTarEntry(tar, "floci-tls/server.crt", certificate.certificatePem(), 0644);
+                addTarEntry(tar, "floci-tls/server.key", certificate.privateKeyPem(), 0600);
+            }
+            lifecycleManager.getDockerClient().copyArchiveToContainerCmd(containerId)
+                    .withRemotePath("/")
+                    .withTarInputStream(new ByteArrayInputStream(bos.toByteArray()))
+                    .exec();
+        } catch (IOException e) {
+            throw new IllegalStateException("Failed to install a TLS certificate into " + containerId, e);
+        }
     }
 
     /**
@@ -1011,14 +1103,16 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
                 """;
     }
 
-    private static void addTarEntry(
-            org.apache.commons.compress.archivers.tar.TarArchiveOutputStream tar,
-            String name, String content) throws java.io.IOException {
-        byte[] bytes = content.getBytes(java.nio.charset.StandardCharsets.UTF_8);
-        org.apache.commons.compress.archivers.tar.TarArchiveEntry entry =
-                new org.apache.commons.compress.archivers.tar.TarArchiveEntry(name);
+    private static void addTarEntry(TarArchiveOutputStream tar, String name, String content) throws IOException {
+        addTarEntry(tar, name, content, 0755);
+    }
+
+    private static void addTarEntry(TarArchiveOutputStream tar, String name, String content, int mode)
+            throws IOException {
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+        TarArchiveEntry entry = new TarArchiveEntry(name);
         entry.setSize(bytes.length);
-        entry.setMode(0755);
+        entry.setMode(mode);
         tar.putArchiveEntry(entry);
         tar.write(bytes);
         tar.closeArchiveEntry();
