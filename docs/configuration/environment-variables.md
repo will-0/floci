@@ -337,7 +337,6 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_SECRETSMANAGER_ENABLED` | `true` | Enable the Secrets Manager service |
 | `FLOCI_SERVICES_SECRETSMANAGER_DEFAULT_RECOVERY_WINDOW_DAYS` | `30` | Default recovery window for deleted secrets |
-| `FLOCI_SERVICES_SECRETSMANAGER_SEED_FILE` | unset | JSON file mapping secret name to the value a valueless `CreateSecret` receives |
 
 ### Cognito
 

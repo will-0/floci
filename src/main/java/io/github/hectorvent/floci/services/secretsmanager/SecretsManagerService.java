@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
@@ -29,9 +28,6 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -71,7 +67,6 @@ public class SecretsManagerService implements ResourceProvider {
     private final LambdaService lambdaService;
     private final ObjectMapper objectMapper;
     private final KmsService kmsService;
-    private final String seedFile;
 
     // Fixed threads with an unbounded queue: a burst of rotations is queued, not rejected,
     // because RotateSecret documents no overload error.
@@ -121,8 +116,7 @@ public class SecretsManagerService implements ResourceProvider {
         this(factory.create("secretsmanager", "secretsmanager-secrets.json",
                         new TypeReference<Map<String, Secret>>() {}),
                 config.services().secretsmanager().defaultRecoveryWindowDays(),
-                regionResolver, lambdaService, objectMapper, kmsService,
-                config.services().secretsmanager().seedFile().orElse(null));
+                regionResolver, lambdaService, objectMapper, kmsService);
     }
 
     SecretsManagerService(StorageBackend<String, Secret> store, int defaultRecoveryWindowDays) {
@@ -138,19 +132,12 @@ public class SecretsManagerService implements ResourceProvider {
     SecretsManagerService(StorageBackend<String, Secret> store, int defaultRecoveryWindowDays,
                           RegionResolver regionResolver, LambdaService lambdaService,
                           ObjectMapper objectMapper, KmsService kmsService) {
-        this(store, defaultRecoveryWindowDays, regionResolver, lambdaService, objectMapper, kmsService, null);
-    }
-
-    SecretsManagerService(StorageBackend<String, Secret> store, int defaultRecoveryWindowDays,
-                          RegionResolver regionResolver, LambdaService lambdaService,
-                          ObjectMapper objectMapper, KmsService kmsService, String seedFile) {
         this.store = store;
         this.defaultRecoveryWindowDays = defaultRecoveryWindowDays;
         this.regionResolver = regionResolver;
         this.lambdaService = lambdaService;
         this.objectMapper = objectMapper;
         this.kmsService = kmsService;
-        this.seedFile = seedFile;
     }
 
     @PreDestroy
@@ -192,10 +179,6 @@ public class SecretsManagerService implements ResourceProvider {
         }
         throwIfBothSecretValues(secretString, secretBinary);
         validateKmsKey(kmsKeyId, region);
-        // Seeded before the existing-secret check so an idempotent retry compares like with like.
-        if (secretString == null && secretBinary == null) {
-            secretString = seededSecretString(name);
-        }
 
         String storageKey = regionKey(region, name);
         Secret existing = store.get(storageKey).orElse(null);
@@ -255,34 +238,6 @@ public class SecretsManagerService implements ResourceProvider {
         store.put(storageKey, secret);
         LOG.infov("Created secret: {0} in region {1}", name, region);
         return secret;
-    }
-
-    /**
-     * Returns the seed file's value for {@code name}, or {@code null} when no seed file is
-     * configured, it does not exist, or it does not name the secret. The file is read on every
-     * call so it can be edited without a restart. A string is used verbatim; any other JSON value
-     * becomes its compact JSON text.
-     */
-    private String seededSecretString(String name) {
-        if (seedFile == null || seedFile.isBlank() || !Files.exists(Path.of(seedFile))) {
-            return null;
-        }
-        JsonNode root;
-        try {
-            root = objectMapper.readTree(Files.readAllBytes(Path.of(seedFile)));
-        } catch (IOException e) {
-            throw new AwsException("InternalServiceError",
-                    "Secrets Manager seed file " + seedFile + " could not be read: " + e.getMessage(), 500);
-        }
-        if (root == null || !root.isObject()) {
-            throw new AwsException("InternalServiceError",
-                    "Secrets Manager seed file " + seedFile + " must be a JSON object of secret name to value.", 500);
-        }
-        JsonNode value = root.get(name);
-        if (value == null) {
-            return null;
-        }
-        return value.isTextual() ? value.asText() : value.toString();
     }
 
     public SecretVersion getSecretValue(String secretId, String versionId, String versionStage, String region) {

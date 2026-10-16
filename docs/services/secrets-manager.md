@@ -41,28 +41,6 @@
 | `FLOCI_SERVICES_SECRETSMANAGER_DEFAULT_RECOVERY_WINDOW_DAYS` | `30` | Days before a deleted secret is permanently purged |
 | `FLOCI_SERVICES_SECRETSMANAGER_SCHEDULED_ROTATION_ENABLED` | `true` | Run the background sweep that fires rotations when a schedule comes due |
 | `FLOCI_SERVICES_SECRETSMANAGER_ROTATION_TICK_SECONDS` | `60` | How often that sweep looks for due rotations |
-| `FLOCI_SERVICES_SECRETSMANAGER_SEED_FILE` | unset | JSON file of values for secrets created without one — see "Seeding secret values" below |
-
-### Seeding secret values
-
-Infrastructure-as-code tools often create a secret with no value (for example OpenTofu's
-`aws_secretsmanager_secret` without an `aws_secretsmanager_secret_version`), leaving an operator to
-fill it in later. To stand in for that step locally, point `FLOCI_SERVICES_SECRETSMANAGER_SEED_FILE`
-(`floci.services.secretsmanager.seed-file`) at a JSON object that maps secret names to values:
-
-```json
-{
-  "app/api-token": "plain-text-value",
-  "app/database": {"username": "admin", "password": "local-only"}
-}
-```
-
-When a `CreateSecret` supplies neither `SecretString` nor `SecretBinary` and the file names the
-secret, the secret is created with that value as its `AWSCURRENT` version. A string is stored
-verbatim; any other JSON value is stored as its compact JSON text. A create that supplies a value is
-unaffected, and a missing file or an unlisted name leaves the secret empty as before. The file is read
-on each create, so edits take effect without a restart. A file that is not a JSON object fails the
-create with `InternalServiceError`.
 
 ## Examples
 

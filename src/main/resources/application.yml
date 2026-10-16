@@ -540,7 +540,6 @@ floci:
       default-recovery-window-days: 30
       scheduled-rotation-enabled: true
       rotation-tick-seconds: 60
-      # seed-file:          # JSON {"secret-name": value} applied to a CreateSecret that supplies no value
     kinesis:
       enabled: true
       list-shards-next-token-ttl-millis: 300000
