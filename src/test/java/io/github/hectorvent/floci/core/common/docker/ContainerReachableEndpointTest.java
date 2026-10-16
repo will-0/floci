@@ -89,4 +89,14 @@ class ContainerReachableEndpointTest {
 
         assertEquals("http://172.18.0.2:4566", endpoint(4510).baseUrl());
     }
+
+    @Test
+    void tlsWithEmbeddedDnsUsesHttps() {
+        when(tls.enabled()).thenReturn(true);
+        when(config.port()).thenReturn(4566);
+        when(config.hostname()).thenReturn(Optional.of("localhost.floci.io"));
+        when(embeddedDnsServer.getServerIp()).thenReturn(Optional.of("172.18.0.2"));
+
+        assertEquals("https://localhost.floci.io:4566", endpoint(4510).baseUrl());
+    }
 }

@@ -46,7 +46,7 @@ public class ContainerReachableEndpoint {
     }
 
     /**
-     * The Floci {@code http://host:port} base URL reachable from inside a launched Docker container.
+     * The Floci base URL reachable from inside a launched Docker container.
      *
      * <p>The port is the one Floci listens on, not the port in {@code floci.base-url}: base-url
      * advertises the host-facing address, which differs under a port mapping such as
@@ -56,10 +56,14 @@ public class ContainerReachableEndpoint {
      * listener is {@code TlsProxyServer} on {@code floci.port}.
      */
     public String baseUrl() {
-        int flociPort = config.tls().enabled() ? config.port() : httpPort;
-        String flociHostname = embeddedDnsServer.getServerIp().isPresent()
+        boolean tls = config.tls().enabled();
+        boolean named = embeddedDnsServer.getServerIp().isPresent();
+        String flociHostname = named
                 ? config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
                 : dockerHostResolver.resolve();
-        return "http://" + flociHostname + ":" + flociPort;
+        // Floci's certificate names its hostname, and every container trusts its CA, so under TLS
+        // containers call it over HTTPS like any AWS endpoint. URLs Floci hands out, such as an SQS
+        // QueueUrl, then match the endpoint the SDK resolves.
+        return (tls && named ? "https://" : "http://") + flociHostname + ":" + (tls ? config.port() : httpPort);
     }
 }
