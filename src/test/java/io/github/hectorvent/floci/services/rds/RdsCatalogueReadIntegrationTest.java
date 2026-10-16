@@ -143,7 +143,7 @@ class RdsCatalogueReadIntegrationTest {
     }
 
     @ParameterizedTest
-    @CsvSource({"aurora-mysql, 8.0.mysql_aurora.3.05.2", "aurora-postgresql, 16.3"})
+    @CsvSource({"aurora-mysql, 8.0.mysql_aurora.3.05.2", "aurora-postgresql, 17.4"})
     void clusterCreatedWithoutAVersionGetsTheCataloguesDefault(String engine, String expected) {
         String id = "default-" + engine;
         String created = query("CreateDBCluster")
@@ -170,7 +170,7 @@ class RdsCatalogueReadIntegrationTest {
     }
 
     @Test
-    void auroraPostgres17ExposesServerlessV2WithoutChangingDefaultVersion() {
+    void auroraPostgres17IsTheDefaultAndExposesServerlessV2() {
         query("DescribeOrderableDBInstanceOptions").formParam("Engine", "aurora-postgresql")
                 .formParam("EngineVersion", "17.4").formParam("DBInstanceClass", "db.serverless")
                 .when().post("/").then().statusCode(200)
@@ -178,7 +178,24 @@ class RdsCatalogueReadIntegrationTest {
                 .body(containsString("<EngineVersion>17.4</EngineVersion>"));
         query("DescribeDBEngineVersions").formParam("Engine", "aurora-postgresql").formParam("DefaultOnly", "true")
                 .when().post("/").then().statusCode(200)
-                .body(containsString("<EngineVersion>16.3</EngineVersion>"));
+                .body(containsString("<EngineVersion>17.4</EngineVersion>"));
+    }
+
+    /** AWS's default Aurora PostgreSQL major is 17, so its default cluster parameter group fits a versionless create. */
+    @Test
+    void auroraPostgresClusterWithoutAVersionTakesTheDefault17ParameterGroup() {
+        String id = "default-aurora-postgresql17-group";
+        String created = query("CreateDBCluster")
+                .formParam("DBClusterIdentifier", id)
+                .formParam("Engine", "aurora-postgresql")
+                .formParam("DBClusterParameterGroupName", "default.aurora-postgresql17")
+                .formParam("MasterUsername", "admin")
+                .formParam("MasterUserPassword", "password123")
+        .when().post("/").then().statusCode(200)
+                .extract().xmlPath().getString("CreateDBClusterResponse.CreateDBClusterResult.DBCluster.EngineVersion");
+        assertEquals("17.4", created);
+        query("DeleteDBCluster").formParam("DBClusterIdentifier", id).formParam("SkipFinalSnapshot", "true")
+        .when().post("/").then().statusCode(200);
     }
 
     @Test

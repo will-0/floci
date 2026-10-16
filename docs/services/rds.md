@@ -571,7 +571,8 @@ reports the parameter group family the create path computes for it, its major ve
 targets (the engine's later versions, with `IsMajorVersionUpgrade` set across a major version). Each
 engine's default is the version a create request that names none gets (instances, clusters and global
 clusters alike), so `DefaultOnly` agrees with what Floci builds; for Aurora MySQL that is
-`8.0.mysql_aurora.3.05.2`. Each version also reports what Floci supports for it: `SupportsReadReplica`
+`8.0.mysql_aurora.3.05.2`, and for Aurora PostgreSQL it is `17.4`, matching AWS's default major version
+of 17, so a versionless create that names `default.aurora-postgresql17` succeeds. Each version also reports what Floci supports for it: `SupportsReadReplica`
 for PostgreSQL only, `SupportsGlobalDatabases` for the two Aurora engines, and `SupportsParallelQuery`
 and `SupportsBabelfish` as false. `ExportableLogTypes` and `SupportedFeatureNames` list the engine's
 documented log types and IAM role feature names. `EngineVersion` takes an exact version or a major version such as `16`, and the

@@ -3303,7 +3303,8 @@ class RdsServiceTest {
 
     @Test
     void describeOrderableDbInstanceOptionsListsAuroraEngines() {
-        List<String> auroraClasses = List.of("db.t3.medium", "db.t4g.medium", "db.r5.large", "db.r6g.large");
+        List<String> auroraClasses =
+                List.of("db.t3.medium", "db.t4g.medium", "db.r5.large", "db.r6g.large", "db.serverless");
 
         List<Map<String, String>> mysql = rdsService.describeOrderableDbInstanceOptions("aurora-mysql", null, null);
         List<Map<String, String>> postgres = rdsService.describeOrderableDbInstanceOptions("aurora-postgresql", null, null);
@@ -3311,9 +3312,12 @@ class RdsServiceTest {
         assertEquals(auroraClasses, mysql.stream().map(o -> o.get("dbInstanceClass")).toList());
         assertTrue(mysql.stream().allMatch(o -> "aurora-mysql".equals(o.get("engine"))
                 && "8.0.mysql_aurora.3.05.2".equals(o.get("engineVersion"))));
-        assertEquals(auroraClasses, postgres.stream().map(o -> o.get("dbInstanceClass")).toList());
-        assertTrue(postgres.stream().allMatch(o -> "aurora-postgresql".equals(o.get("engine"))
-                && "16.3".equals(o.get("engineVersion"))));
+        assertTrue(postgres.stream().allMatch(o -> "aurora-postgresql".equals(o.get("engine"))));
+        for (String version : List.of("16.3", "17.4")) {
+            assertEquals(auroraClasses, postgres.stream().filter(o -> version.equals(o.get("engineVersion")))
+                    .map(o -> o.get("dbInstanceClass")).toList());
+        }
+        assertEquals(2 * auroraClasses.size(), postgres.size());
         assertEquals(1, rdsService.describeOrderableDbInstanceOptions(
                 "aurora-postgresql", "16.3", "db.r6g.large").size());
     }
@@ -9912,7 +9916,7 @@ class RdsServiceTest {
         assertEquals("arn:aws:rds::123456789012:global-cluster:gdb", global.getGlobalClusterArn());
         assertEquals("available", global.getStatus());
         assertEquals("aurora-postgresql", global.getEngine());
-        assertEquals("16.3", global.getEngineVersion(), "the engine's default version when none is given");
+        assertEquals("17.4", global.getEngineVersion(), "the engine's default version when none is given");
         assertTrue(global.isStorageEncrypted());
         assertTrue(global.getMembers().isEmpty());
 
