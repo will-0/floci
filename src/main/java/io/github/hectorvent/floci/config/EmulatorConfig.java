@@ -1894,6 +1894,13 @@ public interface EmulatorConfig {
 
         @WithDefault("60")
         long rotationTickSeconds();
+
+        /**
+         * JSON file mapping secret name to value. A CreateSecret that supplies no value for a
+         * listed name gets that value as its first version, standing in for the operator who
+         * fills in a secret that infrastructure-as-code created empty.
+         */
+        Optional<String> seedFile();
     }
 
     interface ApiGatewayV2ServiceConfig {
