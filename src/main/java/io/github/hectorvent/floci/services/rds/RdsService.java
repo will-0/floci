@@ -801,7 +801,8 @@ public class RdsService implements Resettable, ResourceProvider, DnsRecordSource
         } else {
             placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz, effectiveRegion);
             RdsContainerManager.VpcPlacement vpc = mock ? null
-                    : vpcPlacement(dbSubnetGroupName, vpcSecurityGroupIds, effectiveRegion, proxyPort);
+                    : vpcPlacement(dbSubnetGroupName, vpcSecurityGroupIds, effectiveRegion, proxyPort,
+                            List.of(vpcEndpointName(id, "", effectiveRegion)));
             containerManager.placeInVpc(dbInstanceArn, vpc);
             inVpc = vpc != null;
             if (!mock) {
@@ -4329,7 +4330,9 @@ public class RdsService implements Resettable, ResourceProvider, DnsRecordSource
             masterPassword = generatedMasterPassword();
         }
         RdsContainerManager.VpcPlacement vpc = mock ? null
-                : vpcPlacement(dbSubnetGroupName, vpcSecurityGroupIds, effectiveRegion, proxyPort);
+                : vpcPlacement(dbSubnetGroupName, vpcSecurityGroupIds, effectiveRegion, proxyPort,
+                        clusterHostnames(vpcEndpointName(id, "cluster-", effectiveRegion),
+                                vpcEndpointName(id, "cluster-ro-", effectiveRegion)));
         DbEndpoint endpoint = mock ? new DbEndpoint("localhost", proxyPort)
                 : vpc != null ? vpcEndpoint(id, "cluster-", effectiveRegion, proxyPort) : proxyEndpoint(proxyPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
@@ -7349,23 +7352,43 @@ public class RdsService implements Resettable, ResourceProvider, DnsRecordSource
      * the backend on Floci's Docker network, as it is without enforcement.
      */
     private RdsContainerManager.VpcPlacement vpcPlacement(String subnetGroupName, List<String> securityGroupIds,
-                                                          String region, int proxyPort) {
+                                                          String region, int proxyPort, List<String> hostnames) {
         if (!containerManager.vpcEnabled() || !hasText(subnetGroupName) || "default".equalsIgnoreCase(subnetGroupName)) {
             return null;
         }
         List<String> subnets = getDbSubnetGroup(subnetGroupName, region).getSubnetIds();
         return subnets.isEmpty() ? null : new RdsContainerManager.VpcPlacement(subnets.getFirst(),
-                securityGroupIds != null ? securityGroupIds : List.of(), proxyPort);
+                securityGroupIds != null ? securityGroupIds : List.of(), proxyPort, hostnames);
     }
 
     private RdsContainerManager.VpcPlacement vpcPlacement(DbCluster cluster) {
         return isVpcEndpoint(cluster.getEndpoint()) ? vpcPlacement(cluster.getDbSubnetGroupName(),
-                cluster.getVpcSecurityGroupIds(), regionFromArn(cluster.getDbClusterArn()), cluster.getProxyPort()) : null;
+                cluster.getVpcSecurityGroupIds(), regionFromArn(cluster.getDbClusterArn()), cluster.getProxyPort(),
+                clusterHostnames(cluster.getEndpoint().address(),
+                        cluster.getReaderEndpoint() != null ? cluster.getReaderEndpoint().address() : null)) : null;
     }
 
     private RdsContainerManager.VpcPlacement vpcPlacement(DbInstance instance) {
         return isVpcEndpoint(instance.getEndpoint()) ? vpcPlacement(instance.getDbSubnetGroupName(),
-                instance.getVpcSecurityGroupIds(), regionFromArn(instance.getDbInstanceArn()), instance.getProxyPort()) : null;
+                instance.getVpcSecurityGroupIds(), regionFromArn(instance.getDbInstanceArn()), instance.getProxyPort(),
+                List.of(instance.getEndpoint().address())) : null;
+    }
+
+    /**
+     * The names a VPC cluster's backend answers to: its writer and reader endpoints, and a wildcard
+     * for its member instances, which share the backend and sit one label under the account's RDS
+     * domain ({@code id.cluster-ACCOUNT.REGION...} has members {@code member.ACCOUNT.REGION...}).
+     */
+    private static List<String> clusterHostnames(String writer, String reader) {
+        List<String> names = new ArrayList<>(List.of(writer));
+        if (reader != null) {
+            names.add(reader);
+        }
+        int kind = writer.indexOf(".cluster-");
+        if (kind >= 0) {
+            names.add("*." + writer.substring(kind + ".cluster-".length()));
+        }
+        return names;
     }
 
     /**
@@ -7374,8 +7397,11 @@ public class RdsService implements Resettable, ResourceProvider, DnsRecordSource
      * containers with the backend's namespace address, where the engine's own port works too.
      */
     private DbEndpoint vpcEndpoint(String id, String kind, String region, int proxyPort) {
-        return new DbEndpoint(id + "." + kind + currentAccountId() + "." + region + VPC_ENDPOINT_SUFFIX,
-                proxyEndpoint(proxyPort).port());
+        return new DbEndpoint(vpcEndpointName(id, kind, region), proxyEndpoint(proxyPort).port());
+    }
+
+    private String vpcEndpointName(String id, String kind, String region) {
+        return id + "." + kind + currentAccountId() + "." + region + VPC_ENDPOINT_SUFFIX;
     }
 
     private DbEndpoint restoredEndpoint(DbEndpoint previous, int proxyPort) {

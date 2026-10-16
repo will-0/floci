@@ -4,6 +4,7 @@ import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.ExecCreateCmd;
 import com.github.dockerjava.api.exception.NotFoundException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.Digests;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -34,10 +35,13 @@ import org.apache.commons.compress.archivers.tar.TarArchiveInputStream;
 import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -71,6 +75,7 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     private static final Logger LOG = Logger.getLogger(ContainerLauncher.class);
     private static final String TASK_DIR = "/var/task";
     private static final String RUNTIME_DIR = "/var/runtime";
+    static final String RUNTIME_CA_CERT = RUNTIME_DIR + "/ca-cert.pem";
 
     /**
      * Default base prefix for the containers and code volumes Lambda spawns: the prefix this
@@ -156,6 +161,8 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
     @Inject
     Instance<VpcAttachments> vpcAttachments;
     private final Map<String, VpcAttachments.Attachment> vpcNamespaces = new java.util.HashMap<>();
+    @Inject
+    Instance<FlociCertificateAuthority> certificateAuthority;
 
     /**
      * The namespace a VPC function's containers join. One per subnet and security-group set,
@@ -453,6 +460,10 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
                     LOG.warnv("Could not resolve layer ARN: {0} for function {1}", layerArn, fn.getFunctionName());
                 }
             }
+        }
+
+        if (config.tls().enabled() && certificateAuthority != null && certificateAuthority.isResolvable()) {
+            appendRuntimeCaCert(dockerClient, containerId, certificateAuthority.get().caPem(), fn.getFunctionName());
         }
 
         // Now start the container with code in place
@@ -1531,6 +1542,48 @@ public class ContainerLauncher implements LambdaRuntimeLauncher {
             LOG.debugv("Could not list {0} for function {1} ({2}); assuming no extensions",
                     EXTENSIONS_DIR, functionName, e.getMessage());
             return List.of();
+        }
+    }
+
+    /**
+     * Appends Floci's CA to the runtime's {@link #RUNTIME_CA_CERT}, creating it when the image has
+     * none. AWS ships the RDS CAs in that file, which a function trusts with
+     * {@code NODE_EXTRA_CA_CERTS=/var/runtime/ca-cert.pem}; Floci's RDS certificates come from its
+     * own CA, so the same setting verifies them here. Best effort: on failure the function still
+     * starts, it just cannot verify certificates Floci issued.
+     */
+    static void appendRuntimeCaCert(DockerClient dockerClient, String containerId, String caPem, String functionName) {
+        try {
+            String existing = "";
+            try (InputStream tarStream = dockerClient.copyArchiveFromContainerCmd(containerId, RUNTIME_CA_CERT).exec();
+                 TarArchiveInputStream tar = new TarArchiveInputStream(tarStream)) {
+                TarArchiveEntry entry = tar.getNextEntry();
+                if (entry != null && (entry.isDirectory() || entry.isSymbolicLink() || entry.isLink())) {
+                    LOG.debugv("{0} in function {1} is not a regular file; leaving it alone", RUNTIME_CA_CERT, functionName);
+                    return;
+                }
+                if (entry != null) {
+                    existing = new String(tar.readAllBytes(), StandardCharsets.UTF_8);
+                }
+            } catch (NotFoundException e) {
+                // AWS's base images carry the file; another image may not.
+            }
+            byte[] content = (existing.isEmpty() || existing.endsWith("\n") ? existing : existing + "\n")
+                    .concat(caPem).getBytes(StandardCharsets.UTF_8);
+            ByteArrayOutputStream archive = new ByteArrayOutputStream(content.length + 1024);
+            try (TarArchiveOutputStream tar = new TarArchiveOutputStream(archive)) {
+                // Relative to "/" so the copy also creates /var/runtime in an image without it.
+                TarArchiveEntry entry = new TarArchiveEntry(RUNTIME_CA_CERT.substring(1));
+                entry.setSize(content.length);
+                entry.setMode(0644);
+                tar.putArchiveEntry(entry);
+                tar.write(content);
+                tar.closeArchiveEntry();
+            }
+            dockerClient.copyArchiveToContainerCmd(containerId).withRemotePath("/")
+                    .withTarInputStream(new ByteArrayInputStream(archive.toByteArray())).exec();
+        } catch (Exception e) {
+            LOG.warnv("Could not add Floci''s CA to {0} for function {1}: {2}", RUNTIME_CA_CERT, functionName, e.getMessage());
         }
     }
 

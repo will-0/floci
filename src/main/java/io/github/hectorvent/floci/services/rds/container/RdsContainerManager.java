@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds.container;
 
 import com.github.dockerjava.api.command.InspectContainerResponse;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.config.FlociCertificateAuthority;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -50,6 +51,7 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 
 /**
  * Manages backend Docker container lifecycle for RDS DB instances and clusters.
@@ -79,11 +81,16 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
     Instance<VpcAttachments> vpcAttachments;
     @Inject
     Instance<CertificateGenerator> certificateGenerator;
+    @Inject
+    Instance<FlociCertificateAuthority> certificateAuthority;
     private final Map<String, VpcPlacement> vpcPlacements = new ConcurrentHashMap<>();
     private final Map<String, Runnable> vpcDetachers = new ConcurrentHashMap<>();
 
-    /** A backend's subnet and security groups, and the proxy port its in-VPC clients may also use. */
-    public record VpcPlacement(String subnetId, List<String> securityGroupIds, int proxyPort) {}
+    /**
+     * A backend's subnet and security groups, the proxy port its in-VPC clients may also use, and
+     * the endpoint names they reach it by.
+     */
+    public record VpcPlacement(String subnetId, List<String> securityGroupIds, int proxyPort, List<String> hostnames) {}
     // Auto-pause state of every running container, by runtime id. The timer thread only keeps
     // time: each task it fires runs on a virtual thread of its own, since a pause first asks the
     // RDS service whether the cluster may pause. Events reach the listener one at a time, in order.
@@ -324,7 +331,7 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
                 installMasterGrantInitScript(createdContainerId, masterUsername);
             }
             if (helperId != null && engine == DatabaseEngine.POSTGRES) {
-                installTlsCertificate(createdContainerId);
+                installTlsCertificate(createdContainerId, placement.hostnames());
             }
             ContainerInfo info = lifecycleManager.startCreated(createdContainerId, spec);
             // A backend in its VPC listens in the namespace, which publishes its ports.
@@ -491,10 +498,19 @@ public class RdsContainerManager implements RdsBackendGate, Resettable {
         }
     }
 
-    /** A self-signed certificate: clients that require TLS without verifying it, as most do, connect. */
-    private void installTlsCertificate(String containerId) {
-        CertificateGenerator.GeneratedCertificate certificate = certificateGenerator.get()
-                .generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
+    /**
+     * With Floci's TLS on, a leaf from Floci's CA for the DB's endpoint names, so a client that
+     * verifies the server connects by name, as one trusting the Lambda runtime's CA file does on
+     * AWS. With it off, a self-signed certificate: clients that require TLS without verifying it,
+     * as most do, connect.
+     */
+    private void installTlsCertificate(String containerId, List<String> hostnames) {
+        CertificateGenerator.GeneratedCertificate certificate = config.tls().enabled()
+                ? certificateAuthority.get().issueServerCertificate("localhost",
+                        Stream.concat(hostnames.stream(), Stream.of("localhost")).distinct().toList(),
+                        KeyAlgorithm.RSA_2048, null)
+                : certificateGenerator.get()
+                        .generateSelfSignedCertificate("localhost", List.of("localhost"), KeyAlgorithm.RSA_2048);
         try (ByteArrayOutputStream bos = new ByteArrayOutputStream()) {
             try (TarArchiveOutputStream tar = new TarArchiveOutputStream(bos)) {
                 addTarEntry(tar, "floci-tls/server.crt", certificate.certificatePem(), 0644);

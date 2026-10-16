@@ -838,3 +838,11 @@ PGSSLROOTCERT=./data/tls/rds-ca.crt psql "host=localhost port=7001 user=admin ss
 mysql -h 127.0.0.1 -P 7002 -u root -psecret123 \
   --ssl-mode=VERIFY_IDENTITY --ssl-ca=./data/tls/rds-ca.crt
 ```
+
+A PostgreSQL DB in its VPC (security-group enforcement on, with an explicit DB subnet group)
+also speaks TLS itself to clients inside the VPC. With `FLOCI_TLS_ENABLED=true` its certificate
+comes from the Floci CA and names the DB's `*.rds.localhost.floci.io` endpoints: the instance
+endpoint, or a cluster's writer and reader endpoints and its member instances. Floci appends the
+Floci CA to each Lambda container's `/var/runtime/ca-cert.pem`, the file where AWS ships the RDS
+CAs, so a function that sets `NODE_EXTRA_CA_CERTS=/var/runtime/ca-cert.pem` verifies the
+database by its endpoint name, as it would on AWS. With TLS off the certificate is self-signed.

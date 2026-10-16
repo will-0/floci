@@ -101,6 +101,8 @@ Names are added by the custom domain operations: API Gateway `CreateDomainName`,
 
 Every container Floci launches, from Lambda functions and ECS or Batch tasks to the Docker backends behind RDS, ElastiCache, MWAA and Flink, and the Kubernetes Lambda pods, receives `/etc/floci-ca-bundle.pem`: the public root CAs the Floci JVM trusts, followed by the Floci CA (or your certificate file when you provide one). `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `REQUESTS_CA_BUNDLE`, `NODE_EXTRA_CA_CERTS` and `AWS_CA_BUNDLE` point at it, so curl, Python, Node.js, Go, the AWS CLI and the AWS SDKs that read `AWS_CA_BUNDLE` reach both Floci and public HTTPS sites with no setup in the workload. A variable you set on the function or task definition wins over the injected one. The JVM ignores all of these variables, so a Java workload still needs its own trust store, as shown under SDK Configuration Examples. The bundle is written to `{persistent-path}/tls/floci-ca-bundle.pem` at startup; when it is missing, or when an image has no `/etc` to copy it into, the container starts without the variables and Floci logs a warning.
 
+Lambda containers also get the Floci CA appended to `/var/runtime/ca-cert.pem` (created when the image has none). That is where AWS's Lambda runtimes keep the RDS CAs, so a function that sets `NODE_EXTRA_CA_CERTS=/var/runtime/ca-cert.pem` trusts the Floci-issued certificate of a PostgreSQL DB in its VPC.
+
 ## User-Provided Certificates
 
 To use your own certificate (e.g., from a corporate CA or mkcert):
