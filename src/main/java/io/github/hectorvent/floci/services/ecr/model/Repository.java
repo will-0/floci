@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.ecr.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -20,6 +22,7 @@ public class Repository {
     private String registryRepositoryName;
     private Instant createdAt;
     private String imageTagMutability = "MUTABLE";
+    private List<ImageTagMutabilityExclusionFilter> imageTagMutabilityExclusionFilters = new ArrayList<>();
     private boolean scanOnPush;
     private String encryptionType = "AES256";
     private String kmsKey;
@@ -51,6 +54,13 @@ public class Repository {
 
     public String getImageTagMutability() { return imageTagMutability; }
     public void setImageTagMutability(String imageTagMutability) { this.imageTagMutability = imageTagMutability; }
+
+    public List<ImageTagMutabilityExclusionFilter> getImageTagMutabilityExclusionFilters() {
+        return imageTagMutabilityExclusionFilters;
+    }
+    public void setImageTagMutabilityExclusionFilters(List<ImageTagMutabilityExclusionFilter> filters) {
+        this.imageTagMutabilityExclusionFilters = filters == null ? new ArrayList<>() : new ArrayList<>(filters);
+    }
 
     public boolean isScanOnPush() { return scanOnPush; }
     public void setScanOnPush(boolean scanOnPush) { this.scanOnPush = scanOnPush; }

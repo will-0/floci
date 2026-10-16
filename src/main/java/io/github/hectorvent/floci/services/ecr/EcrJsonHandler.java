@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.ecr.model.Image;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageFailure;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
+import io.github.hectorvent.floci.services.ecr.model.ImageTagMutabilityExclusionFilter;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -88,7 +89,7 @@ public class EcrJsonHandler {
         Map<String, String> tags = parseTags(request.path("tags"));
 
         Repository repo = service.createRepository(repositoryName, registryId, tagMutability,
-                scanOnPush, encType, kmsKey, tags, region);
+                parseExclusionFilters(request), scanOnPush, encType, kmsKey, tags, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.set("repository", buildRepository(repo));
@@ -382,12 +383,43 @@ public class EcrJsonHandler {
         String registryId = request.path("registryId").asText(null);
         String mutability = request.path("imageTagMutability").asText(null);
 
-        Repository updated = service.putImageTagMutability(repo, registryId, mutability, region);
+        Repository updated = service.putImageTagMutability(repo, registryId, mutability,
+                parseExclusionFilters(request), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("registryId", updated.getRegistryId());
         response.put("repositoryName", updated.getRepositoryName());
-        response.put("imageTagMutability", updated.getImageTagMutability());
+        putTagMutability(response, updated);
         return Response.ok(response).build();
+    }
+
+    private static List<ImageTagMutabilityExclusionFilter> parseExclusionFilters(JsonNode request) {
+        JsonNode node = request.path("imageTagMutabilityExclusionFilters");
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isArray()) {
+            throw new AwsException("InvalidParameterException",
+                    "imageTagMutabilityExclusionFilters must be a list", 400);
+        }
+        List<ImageTagMutabilityExclusionFilter> out = new ArrayList<>();
+        for (JsonNode filter : node) {
+            out.add(new ImageTagMutabilityExclusionFilter(
+                    filter.path("filterType").asText(null), filter.path("filter").asText(null)));
+        }
+        return out;
+    }
+
+    /** ECR omits the exclusion filter list for repositories that have none. */
+    private void putTagMutability(ObjectNode target, Repository repo) {
+        target.put("imageTagMutability", repo.getImageTagMutability());
+        if (!repo.getImageTagMutabilityExclusionFilters().isEmpty()) {
+            ArrayNode filters = target.putArray("imageTagMutabilityExclusionFilters");
+            for (ImageTagMutabilityExclusionFilter filter : repo.getImageTagMutabilityExclusionFilters()) {
+                filters.addObject()
+                        .put("filterType", filter.getFilterType())
+                        .put("filter", filter.getFilter());
+            }
+        }
     }
 
     private Response handleTagResource(JsonNode request, String region) {
@@ -593,7 +625,7 @@ public class EcrJsonHandler {
         if (repo.getCreatedAt() != null) {
             n.put("createdAt", repo.getCreatedAt().getEpochSecond());
         }
-        n.put("imageTagMutability", repo.getImageTagMutability());
+        putTagMutability(n, repo);
 
         ObjectNode scanCfg = objectMapper.createObjectNode();
         scanCfg.put("scanOnPush", repo.isScanOnPush());

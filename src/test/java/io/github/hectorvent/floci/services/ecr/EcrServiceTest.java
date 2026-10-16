@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
+import io.github.hectorvent.floci.services.ecr.model.ImageTagMutabilityExclusionFilter;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
@@ -321,14 +322,80 @@ class EcrServiceTest {
     void immutableRepositoryIsMarkedForDataPlaneTagProtection() {
         service.createRepository(REPO, null, "IMMUTABLE", null, null, null, null, REGION);
 
-        assertTrue(service.isImageTagImmutable(REPO, ACCOUNT, REGION));
+        assertTrue(service.isImageTagImmutable(REPO, ACCOUNT, "v1", REGION));
     }
 
     @Test
     void mutableRepositoryIsNotMarkedForDataPlaneTagProtection() {
         service.createRepository(REPO, null, "MUTABLE", null, null, null, null, REGION);
 
-        assertFalse(service.isImageTagImmutable(REPO, ACCOUNT, REGION));
+        assertFalse(service.isImageTagImmutable(REPO, ACCOUNT, "v1", REGION));
+    }
+
+    @Test
+    void immutableWithExclusionLeavesOnlyMatchingTagsMutable() {
+        service.createRepository(REPO, null, "IMMUTABLE_WITH_EXCLUSION",
+                List.of(wildcard("buildcache"), wildcard("dev-*")), null, null, null, null, REGION);
+
+        assertFalse(service.isImageTagImmutable(REPO, ACCOUNT, "buildcache", REGION));
+        assertFalse(service.isImageTagImmutable(REPO, ACCOUNT, "dev-123", REGION));
+        assertTrue(service.isImageTagImmutable(REPO, ACCOUNT, "buildcache-old", REGION));
+        assertTrue(service.isImageTagImmutable(REPO, ACCOUNT, "v1", REGION));
+    }
+
+    @Test
+    void mutableWithExclusionMakesOnlyMatchingTagsImmutable() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+        Repository repo = service.putImageTagMutability(REPO, null, "MUTABLE_WITH_EXCLUSION",
+                List.of(wildcard("release-*.*")), REGION);
+
+        assertEquals("MUTABLE_WITH_EXCLUSION", repo.getImageTagMutability());
+        assertEquals("release-*.*", repo.getImageTagMutabilityExclusionFilters().getFirst().getFilter());
+        assertTrue(service.isImageTagImmutable(REPO, ACCOUNT, "release-1.2", REGION));
+        assertFalse(service.isImageTagImmutable(REPO, ACCOUNT, "release-1", REGION));
+        assertFalse(service.isImageTagImmutable(REPO, ACCOUNT, "latest", REGION));
+    }
+
+    @Test
+    void switchingBackToImmutableClearsExclusionFilters() {
+        service.createRepository(REPO, null, "IMMUTABLE_WITH_EXCLUSION",
+                List.of(wildcard("buildcache")), null, null, null, null, REGION);
+
+        Repository repo = service.putImageTagMutability(REPO, null, "IMMUTABLE", REGION);
+
+        assertTrue(repo.getImageTagMutabilityExclusionFilters().isEmpty());
+        assertTrue(service.isImageTagImmutable(REPO, ACCOUNT, "buildcache", REGION));
+    }
+
+    @Test
+    void exclusionFiltersAreValidatedAgainstTheMutabilitySetting() {
+        service.createRepository(REPO, null, null, null, null, null, null, REGION);
+
+        assertInvalidParameter(() -> service.putImageTagMutability(REPO, null, "IMMUTABLE_WITH_EXCLUSION",
+                List.of(), REGION));
+        assertInvalidParameter(() -> service.putImageTagMutability(REPO, null, "IMMUTABLE",
+                List.of(wildcard("buildcache")), REGION));
+        assertInvalidParameter(() -> service.putImageTagMutability(REPO, null, "IMMUTABLE_WITH_EXCLUSION",
+                List.of(new ImageTagMutabilityExclusionFilter("REGEX", "build.*")), REGION));
+        assertInvalidParameter(() -> service.putImageTagMutability(REPO, null, "IMMUTABLE_WITH_EXCLUSION",
+                List.of(wildcard("build/cache")), REGION));
+        assertInvalidParameter(() -> service.putImageTagMutability(REPO, null, "MUTABLE_WITH_EXCLUSION",
+                List.of(wildcard("a"), wildcard("b"), wildcard("c"), wildcard("d"), wildcard("e"),
+                        wildcard("f")), REGION));
+        assertInvalidParameter(() -> service.putImageTagMutability(REPO, null, "SOMETIMES", REGION));
+        assertInvalidParameter(() -> service.createRepository("floci-it/other", null,
+                "MUTABLE_WITH_EXCLUSION", null, null, null, null, null, REGION));
+        assertEquals("MUTABLE",
+                service.describeRepositories(List.of(REPO), null, REGION).getFirst().getImageTagMutability());
+    }
+
+    private static ImageTagMutabilityExclusionFilter wildcard(String filter) {
+        return new ImageTagMutabilityExclusionFilter("WILDCARD", filter);
+    }
+
+    private static void assertInvalidParameter(org.junit.jupiter.api.function.Executable call) {
+        AwsException e = assertThrows(AwsException.class, call);
+        assertEquals("InvalidParameterException", e.getErrorCode());
     }
 
     @Test

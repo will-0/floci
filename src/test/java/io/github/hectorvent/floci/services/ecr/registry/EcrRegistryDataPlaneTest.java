@@ -220,7 +220,7 @@ class EcrRegistryDataPlaneTest {
             when(config.services().ecr().uriStyle()).thenReturn("hostname");
             when(registryManager.httpClient())
                     .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
-            when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
+            when(ecrService.isImageTagImmutable("platform/api", "000000000000", "v1", "us-east-1"))
                     .thenReturn(true);
             when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                     .thenReturn("legacy/platform-api");
@@ -284,7 +284,7 @@ class EcrRegistryDataPlaneTest {
             when(config.services().ecr().uriStyle()).thenReturn("hostname");
             when(registryManager.httpClient())
                     .thenReturn(new RegistryHttpClient("http://127.0.0.1:" + registry.actualPort()));
-            when(ecrService.isImageTagImmutable("platform/api", "000000000000", "us-east-1"))
+            when(ecrService.isImageTagImmutable("platform/api", "000000000000", "v1", "us-east-1"))
                     .thenReturn(true);
             when(ecrService.registryRepositoryName("platform/api", "000000000000", "us-east-1"))
                     .thenReturn("legacy/platform-api");

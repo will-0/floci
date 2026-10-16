@@ -20,6 +20,7 @@ import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
 import io.github.hectorvent.floci.services.ecr.model.ImageFailure;
 import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
+import io.github.hectorvent.floci.services.ecr.model.ImageTagMutabilityExclusionFilter;
 import io.github.hectorvent.floci.services.ecr.model.PullThroughCacheRule;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
@@ -63,6 +64,10 @@ public class EcrService implements ResourceProvider {
             "github-container-registry", "azure-container-registry",
             "gitlab-container-registry", "chainguard");
     private static final int MAX_REPO_NAME_LENGTH = 256;
+    private static final Set<String> TAG_MUTABILITIES = Set.of(
+            "MUTABLE", "IMMUTABLE", "MUTABLE_WITH_EXCLUSION", "IMMUTABLE_WITH_EXCLUSION");
+    private static final Pattern EXCLUSION_FILTER = Pattern.compile("[0-9a-zA-Z._*-]{1,128}");
+    private static final int MAX_EXCLUSION_FILTERS = 5;
     private static final int MAX_PULL_THROUGH_CACHE_PREFIX_LENGTH = 30;
 
     private final StorageBackend<String, Repository> repoStore;
@@ -300,7 +305,23 @@ public class EcrService implements ResourceProvider {
                                        String kmsKey,
                                        Map<String, String> tags,
                                        String region) {
+        return createRepository(repositoryName, registryId, imageTagMutability, null,
+                scanOnPush, encryptionType, kmsKey, tags, region);
+    }
+
+    public Repository createRepository(String repositoryName,
+                                       String registryId,
+                                       String imageTagMutability,
+                                       List<ImageTagMutabilityExclusionFilter> exclusionFilters,
+                                       Boolean scanOnPush,
+                                       String encryptionType,
+                                       String kmsKey,
+                                       Map<String, String> tags,
+                                       String region) {
         validateRepoName(repositoryName);
+        String mutability = imageTagMutability == null || imageTagMutability.isBlank()
+                ? "MUTABLE" : imageTagMutability;
+        validateTagMutability(mutability, exclusionFilters);
         // Repository records are pure metadata: the ARN and the URI are derived from the
         // configured account, region and registry port, none of which need Docker. Start
         // the backing registry opportunistically so the URI reflects an already-adopted
@@ -321,9 +342,8 @@ public class EcrService implements ResourceProvider {
         repo.setRepositoryArn(AwsArnUtils.Arn.of("ecr", region, account, "repository/" + repositoryName).toString());
         repo.setRepositoryUri(registryManager.getRepositoryUri(account, region, repositoryName));
         repo.setCreatedAt(Instant.now());
-        if (imageTagMutability != null && !imageTagMutability.isBlank()) {
-            repo.setImageTagMutability(imageTagMutability);
-        }
+        repo.setImageTagMutability(mutability);
+        repo.setImageTagMutabilityExclusionFilters(exclusionFilters);
         if (scanOnPush != null) {
             repo.setScanOnPush(scanOnPush);
         }
@@ -635,24 +655,72 @@ public class EcrService implements ResourceProvider {
 
     public Repository putImageTagMutability(String repositoryName, String registryId,
                                             String mutability, String region) {
-        if (mutability == null
-                || (!"MUTABLE".equals(mutability) && !"IMMUTABLE".equals(mutability))) {
-            throw new AwsException("InvalidParameterException",
-                    "imageTagMutability must be MUTABLE or IMMUTABLE", 400);
-        }
+        return putImageTagMutability(repositoryName, registryId, mutability, null, region);
+    }
+
+    public Repository putImageTagMutability(String repositoryName, String registryId, String mutability,
+                                            List<ImageTagMutabilityExclusionFilter> exclusionFilters,
+                                            String region) {
+        validateTagMutability(mutability, exclusionFilters);
         Repository repo = requireRepo(repositoryName, registryId, region);
         repo.setImageTagMutability(mutability);
+        repo.setImageTagMutabilityExclusionFilters(exclusionFilters);
         repoStore.put(key(region, repo.getRegistryId(), repositoryName), repo);
         return repo;
     }
 
-    /** Returns whether the repository rejects a second manifest write for an existing tag. */
-    public boolean isImageTagImmutable(String repositoryName, String registryId, String region) {
+    /**
+     * Exclusion filters belong to, and are required by, the two {@code *_WITH_EXCLUSION} settings,
+     * which is how ECR validates CreateRepository and PutImageTagMutability.
+     */
+    private static void validateTagMutability(String mutability,
+                                              List<ImageTagMutabilityExclusionFilter> exclusionFilters) {
+        if (mutability == null || !TAG_MUTABILITIES.contains(mutability)) {
+            throw new AwsException("InvalidParameterException",
+                    "imageTagMutability must be MUTABLE, IMMUTABLE, MUTABLE_WITH_EXCLUSION or "
+                            + "IMMUTABLE_WITH_EXCLUSION", 400);
+        }
+        boolean withExclusion = mutability.endsWith("_WITH_EXCLUSION");
+        int count = exclusionFilters == null ? 0 : exclusionFilters.size();
+        if (!withExclusion && count > 0) {
+            throw new AwsException("InvalidParameterException",
+                    "imageTagMutabilityExclusionFilters can only be specified when imageTagMutability is "
+                            + "MUTABLE_WITH_EXCLUSION or IMMUTABLE_WITH_EXCLUSION", 400);
+        }
+        if (withExclusion && (count < 1 || count > MAX_EXCLUSION_FILTERS)) {
+            throw new AwsException("InvalidParameterException",
+                    "imageTagMutabilityExclusionFilters must contain between 1 and " + MAX_EXCLUSION_FILTERS
+                            + " filters when imageTagMutability is " + mutability, 400);
+        }
+        for (int i = 0; i < count; i++) {
+            ImageTagMutabilityExclusionFilter filter = exclusionFilters.get(i);
+            if (filter == null || !"WILDCARD".equals(filter.getFilterType())) {
+                throw new AwsException("InvalidParameterException",
+                        "imageTagMutabilityExclusionFilters filterType must be WILDCARD", 400);
+            }
+            if (filter.getFilter() == null || !EXCLUSION_FILTER.matcher(filter.getFilter()).matches()) {
+                throw new AwsException("InvalidParameterException",
+                        "imageTagMutabilityExclusionFilters filter must be 1 to 128 characters of "
+                                + "letters, digits, '.', '_', '-' and '*'", 400);
+            }
+        }
+    }
+
+    /** Returns whether the repository rejects a second manifest write for {@code tag}. */
+    public boolean isImageTagImmutable(String repositoryName, String registryId, String tag, String region) {
         String account = effectiveAccount(registryId);
         return repoStore.get(key(region, account, repositoryName))
-                .map(Repository::getImageTagMutability)
-                .filter("IMMUTABLE"::equals)
-                .isPresent();
+                .map(repo -> {
+                    boolean excluded = repo.getImageTagMutabilityExclusionFilters().stream()
+                            .anyMatch(filter -> filter.matches(tag));
+                    return switch (String.valueOf(repo.getImageTagMutability())) {
+                        case "IMMUTABLE" -> true;
+                        case "IMMUTABLE_WITH_EXCLUSION" -> !excluded;
+                        case "MUTABLE_WITH_EXCLUSION" -> excluded;
+                        default -> false;
+                    };
+                })
+                .orElse(false);
     }
 
     /** Returns the physical registry namespace selected for an ECR repository. */

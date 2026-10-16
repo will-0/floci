@@ -94,7 +94,8 @@ public class EcrRegistryDataPlane {
 
     private String immutableTag(RoutingContext context, RegistryRequest request) {
         if (request.tag() == null || !"PUT".equals(context.request().method().name())
-                || !ecrService.isImageTagImmutable(request.repositoryName(), request.accountId(), request.region())) {
+                || !ecrService.isImageTagImmutable(
+                        request.repositoryName(), request.accountId(), request.tag(), request.region())) {
             return null;
         }
         return request.accountId() + "/" + request.region() + "/" + request.repositoryName() + ":" + request.tag();

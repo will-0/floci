@@ -517,4 +517,101 @@ class EcrIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("PullThroughCacheRuleNotFoundException"));
     }
+
+    @Test
+    @Order(17)
+    void imageTagMutabilityExclusionFiltersRoundTrip() {
+        String repository = "floci-it/tag-exclusions";
+        given()
+            .header("X-Amz-Target", PREFIX + "CreateRepository")
+            .contentType(CT)
+            .body("""
+                {
+                  "repositoryName": "%s",
+                  "imageTagMutability": "IMMUTABLE_WITH_EXCLUSION",
+                  "imageTagMutabilityExclusionFilters": [
+                    { "filterType": "WILDCARD", "filter": "buildcache" }
+                  ]
+                }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("repository.imageTagMutability", equalTo("IMMUTABLE_WITH_EXCLUSION"))
+            .body("repository.imageTagMutabilityExclusionFilters[0].filterType", equalTo("WILDCARD"))
+            .body("repository.imageTagMutabilityExclusionFilters[0].filter", equalTo("buildcache"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "PutImageTagMutability")
+            .contentType(CT)
+            .body("""
+                {
+                  "repositoryName": "%s",
+                  "imageTagMutability": "MUTABLE_WITH_EXCLUSION",
+                  "imageTagMutabilityExclusionFilters": [
+                    { "filterType": "WILDCARD", "filter": "release-*" },
+                    { "filterType": "WILDCARD", "filter": "prod" }
+                  ]
+                }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("repositoryName", equalTo(repository))
+            .body("imageTagMutability", equalTo("MUTABLE_WITH_EXCLUSION"))
+            .body("imageTagMutabilityExclusionFilters.filter", contains("release-*", "prod"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DescribeRepositories")
+            .contentType(CT)
+            .body("""
+                { "repositoryNames": ["%s"] }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("repositories[0].imageTagMutability", equalTo("MUTABLE_WITH_EXCLUSION"))
+            .body("repositories[0].imageTagMutabilityExclusionFilters.filterType",
+                    contains("WILDCARD", "WILDCARD"))
+            .body("repositories[0].imageTagMutabilityExclusionFilters.filter", contains("release-*", "prod"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "PutImageTagMutability")
+            .contentType(CT)
+            .body("""
+                { "repositoryName": "%s", "imageTagMutability": "IMMUTABLE_WITH_EXCLUSION" }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterException"));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "PutImageTagMutability")
+            .contentType(CT)
+            .body("""
+                { "repositoryName": "%s", "imageTagMutability": "MUTABLE" }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("imageTagMutability", equalTo("MUTABLE"))
+            .body("$", not(hasKey("imageTagMutabilityExclusionFilters")));
+
+        given()
+            .header("X-Amz-Target", PREFIX + "DeleteRepository")
+            .contentType(CT)
+            .body("""
+                { "repositoryName": "%s", "force": true }
+                """.formatted(repository))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }
